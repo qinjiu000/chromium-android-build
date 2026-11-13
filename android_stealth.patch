@@ -1,0 +1,465 @@
+diff --git a/components/embedder_support/user_agent_utils.cc b/components/embedder_support/user_agent_utils.cc
+index 83329387..0a72603e 100644
+--- a/components/embedder_support/user_agent_utils.cc
++++ b/components/embedder_support/user_agent_utils.cc
+@@ -161,6 +161,9 @@ const blink::UserAgentBrandList GetUserAgentBrandList(
+   std::optional<std::string> brand;
+ #if !BUILDFLAG(CHROMIUM_BRANDING)
+   brand = version_info::GetProductName();
++#else
++  // ANDROID STEALTH: retain the Chrome brand on branded Android builds.
++  brand = "Google Chrome";
+ #endif
+ 
+   std::string brand_version =
+@@ -446,9 +449,7 @@ std::string BuildUserAgentFromProduct(const std::string& product) {
+ // depending on the Reduce User-Agent reduction phase features.
+ std::string GetUserAgentInternal() {
+   std::string product = GetProductAndVersion();
+-  if (base::CommandLine::ForCurrentProcess()->HasSwitch(kHeadless)) {
+-    product.insert(0, "Headless");
+-  }
++  // ANDROID STEALTH: do not add the Headless prefix to the product name.
+ 
+ #if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS)
+   if (base::CommandLine::ForCurrentProcess()->HasSwitch(kUseMobileUserAgent)) {
+diff --git a/content/browser/renderer_host/render_process_host_impl.cc b/content/browser/renderer_host/render_process_host_impl.cc
+index 16c56bb3..55e5fad6 100644
+--- a/content/browser/renderer_host/render_process_host_impl.cc
++++ b/content/browser/renderer_host/render_process_host_impl.cc
+@@ -4075,6 +4075,9 @@ void RenderProcessHostImpl::PropagateBrowserCommandLineToRenderer(
+       switches::kEnableLowEndDeviceMode,
+       switches::kDisableLowEndDeviceMode,
+       switches::kDisallowNonExactResourceReuse,
++      // STEALTH PATCH (phase 3): forward the fingerprint-noise seed to
++      // renderer processes.
++      "stealth-seed",
+ #if BUILDFLAG(IS_ANDROID)
+       switches::kDisableMediaSessionAPI,
+       switches::kRendererWaitForJavaDebugger,
+diff --git a/third_party/blink/renderer/core/frame/navigator.cc b/third_party/blink/renderer/core/frame/navigator.cc
+index 72964f48..eff93cc0 100644
+--- a/third_party/blink/renderer/core/frame/navigator.cc
++++ b/third_party/blink/renderer/core/frame/navigator.cc
+@@ -79,12 +79,9 @@ bool Navigator::cookieEnabled() const {
+ }
+ 
+ bool Navigator::webdriver() const {
+-  if (RuntimeEnabledFeatures::AutomationControlledEnabled())
+-    return true;
+-
+-  bool automation_enabled = false;
+-  probe::ApplyAutomationOverride(GetExecutionContext(), automation_enabled);
+-  return automation_enabled;
++  // STEALTH PATCH (phase 1): never report automation control, even when
++  // driven through DevTools/CDP.
++  return false;
+ }
+ 
+ String Navigator::GetAcceptLanguages() {
+diff --git a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
+index d4d74d39..f50cfd7f 100644
+--- a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
++++ b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
+@@ -18,6 +18,9 @@
+ #include "base/byte_size.h"
+ #include "base/check.h"
+ #include "base/check_op.h"
++#include "base/command_line.h"
++#include "base/compiler_specific.h"
++#include "base/containers/span.h"
+ #include "base/feature_list.h"
+ #include "base/location.h"
+ #include "base/memory/safety_checks.h"
+@@ -28,6 +31,7 @@
+ #include "base/notreached.h"
+ #include "base/numerics/checked_math.h"
+ #include "base/numerics/safe_conversions.h"
++#include "base/strings/string_number_conversions.h"
+ #include "base/strings/stringprintf.h"
+ #include "base/task/sequenced_task_runner.h"
+ #include "base/task/single_thread_task_runner.h"
+@@ -164,6 +168,83 @@ bool IsContextProviderValid() {
+          !context_provider_wrapper->ContextProvider().IsContextLost();
+ }
+ 
++// STEALTH PATCH (phase 3): fingerprint-noise seed. `--stealth-seed=N`
++// overrides the built-in default; the same seed always yields the same
++// noise, so repeated reads of one canvas stay consistent.
++uint32_t StealthSeed() {
++  static const uint32_t seed = [] {
++    const std::string value =
++        base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
++            "stealth-seed");
++    uint32_t parsed = 0;
++    if (!value.empty() && base::StringToUint(value, &parsed)) {
++      return parsed;
++    }
++    return 0x5EEDC10Au;
++  }();
++  return seed;
++}
++
++// Deterministic 32-bit hash of (seed, x, y); splitmix32-style finalizer.
++uint32_t StealthPixelHash(uint32_t seed, uint32_t x, uint32_t y) {
++  uint32_t h = seed + 0x9E3779B9u + x * 0x85EBCA6Bu + y * 0xC2B2AE35u;
++  h ^= h >> 16;
++  h *= 0x7FEB352Du;
++  h ^= h >> 15;
++  h *= 0x846CA68Bu;
++  h ^= h >> 16;
++  return h;
++}
++
++// Flip the LSB of one channel in ~1/64 of the pixels inside
++// [min_x, max_x) x [min_y, max_y) (canvas coordinates). Invisible (+/-1),
++// deterministic per (seed, x, y), and identical across readback paths, so
++// getImageData and toDataURL agree with each other.
++void PerturbPixmap(SkPixmap& pixmap,
++                   int origin_x,
++                   int origin_y,
++                   int min_x,
++                   int min_y,
++                   int max_x,
++                   int max_y) {
++  SkColorType color_type = pixmap.colorType();
++  if (color_type != kRGBA_8888_SkColorType &&
++      color_type != kBGRA_8888_SkColorType) {
++    return;
++  }
++  const uint32_t seed = StealthSeed();
++  const int width = pixmap.width();
++  const int height = pixmap.height();
++  const size_t row_bytes = pixmap.rowBytes();
++  // RGBA_8888 stores R first, BGRA_8888 stores B first. Map the logical
++  // channel through the pixmap's byte order so both readback paths flip
++  // the same channel even when their pixmaps disagree on byte order.
++  const bool is_bgra = (color_type == kBGRA_8888_SkColorType);
++  // The span size comes from the pixmap itself, so this is safe; the
++  // checker cannot verify it, hence the annotation.
++  base::span<uint8_t> bytes = UNSAFE_BUFFERS(base::span<uint8_t>(
++      static_cast<uint8_t*>(pixmap.writable_addr()),
++      pixmap.computeByteSize()));
++  for (int y = 0; y < height; ++y) {
++    const int canvas_y = origin_y + y;
++    if (canvas_y < min_y || canvas_y >= max_y) {
++      continue;
++    }
++    for (int x = 0; x < width; ++x) {
++      const int canvas_x = origin_x + x;
++      if (canvas_x < min_x || canvas_x >= max_x) {
++        continue;
++      }
++      const uint32_t h = StealthPixelHash(seed, canvas_x, canvas_y);
++      if (h % 64 == 0) {
++        const int channel = h % 3;
++        bytes[y * row_bytes + x * 4 + (is_bgra ? 2 - channel : channel)] ^=
++            1;
++      }
++    }
++  }
++}
++
+ }  // namespace
+ 
+ constexpr char kDefaultFont[] = "10px sans-serif";
+@@ -1477,6 +1558,12 @@ ImageData* BaseRenderingContext2D::getImageDataInternal(
+       SkIRect bounds =
+           snapshot->PaintImageForCurrentFrame().GetSkImageInfo().bounds();
+       DCHECK(!bounds.intersect(SkIRect::MakeXYWH(sx, sy, sw, sh)));
++    } else {
++      // STEALTH PATCH (phase 3): deterministic per-seed pixel noise.
++      // Only pixels inside the snapshot are perturbed; out-of-bounds
++      // areas stay zero-initialized, as before.
++      PerturbPixmap(image_data_pixmap, sx, sy, 0, 0,
++                    snapshot->Size().width(), snapshot->Size().height());
+     }
+   }
+ 
+diff --git a/third_party/blink/renderer/modules/webaudio/analyser_node.cc b/third_party/blink/renderer/modules/webaudio/analyser_node.cc
+index 4bc4b15f..38c336b7 100644
+--- a/third_party/blink/renderer/modules/webaudio/analyser_node.cc
++++ b/third_party/blink/renderer/modules/webaudio/analyser_node.cc
+@@ -25,6 +25,11 @@
+ 
+ #include "third_party/blink/renderer/modules/webaudio/analyser_node.h"
+ 
++#include "base/command_line.h"
++#include "base/compiler_specific.h"
++#include "base/containers/span.h"
++#include "base/strings/string_number_conversions.h"
++
+ #include "third_party/blink/renderer/bindings/modules/v8/v8_analyser_options.h"
+ #include "third_party/blink/renderer/modules/webaudio/analyser_handler.h"
+ #include "third_party/blink/renderer/modules/webaudio/audio_graph_tracer.h"
+@@ -32,6 +37,69 @@
+ 
+ namespace blink {
+ 
++namespace {
++
++// STEALTH PATCH (phase 3): fingerprint-noise seed; same design as in
++// base_rendering_context_2d.cc. `--stealth-seed=N` overrides the built-in
++// default; the same seed always yields the same noise.
++uint32_t StealthSeed() {
++  static const uint32_t seed = [] {
++    const std::string value =
++        base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
++            "stealth-seed");
++    uint32_t parsed = 0;
++    if (!value.empty() && base::StringToUint(value, &parsed)) {
++      return parsed;
++    }
++    return 0x5EEDC10Au;
++  }();
++  return seed;
++}
++
++// Deterministic 32-bit hash of (seed, index, salt); splitmix32-style
++// finalizer.
++uint32_t StealthIndexHash(uint32_t seed, uint32_t index, uint32_t salt) {
++  uint32_t h = seed + 0x9E3779B9u + index * 0x85EBCA6Bu + salt;
++  h ^= h >> 16;
++  h *= 0x7FEB352Du;
++  h ^= h >> 15;
++  h *= 0x846CA68Bu;
++  h ^= h >> 16;
++  return h;
++}
++
++// Add up to +/-0.001 of deterministic noise to each bin; inaudible, but
++// changes the float bits. Same seed + same input = same output.
++void PerturbFloatArray(DOMFloat32Array* array, uint32_t salt) {
++  const uint32_t seed = StealthSeed();
++  // The span size comes from the array itself, so this is safe; the
++  // checker cannot verify it, hence the annotation.
++  base::span<float> data =
++      UNSAFE_BUFFERS(base::span<float>(array->Data(), array->length()));
++  for (size_t i = 0; i < data.size(); ++i) {
++    const uint32_t h =
++        StealthIndexHash(seed, static_cast<uint32_t>(i), salt);
++    data[i] += (static_cast<int>(h % 2001) - 1000) * 1e-6f;
++  }
++}
++
++void PerturbByteArray(DOMUint8Array* array, uint32_t salt) {
++  const uint32_t seed = StealthSeed();
++  // The span size comes from the array itself, so this is safe; the
++  // checker cannot verify it, hence the annotation.
++  base::span<uint8_t> data = UNSAFE_BUFFERS(
++      base::span<uint8_t>(array->Data(), array->length()));
++  for (size_t i = 0; i < data.size(); ++i) {
++    const uint32_t h =
++        StealthIndexHash(seed, static_cast<uint32_t>(i), salt);
++    if (h % 64 == 0) {
++      data[i] ^= 1;
++    }
++  }
++}
++
++}  // namespace
++
+ AnalyserNode::AnalyserNode(BaseAudioContext& context) : AudioNode(context) {
+   SetHandler(AnalyserHandler::Create(*this, context.sampleRate()));
+ }
+@@ -126,19 +194,27 @@ double AnalyserNode::smoothingTimeConstant() const {
+ void AnalyserNode::getFloatFrequencyData(NotShared<DOMFloat32Array> array) {
+   GetAnalyserHandler().GetFloatFrequencyData(array.Get(),
+                                              context()->currentTime());
++  // STEALTH PATCH (phase 3): deterministic per-seed noise.
++  PerturbFloatArray(array.Get(), 0xF12E9u);
+ }
+ 
+ void AnalyserNode::getByteFrequencyData(NotShared<DOMUint8Array> array) {
+   GetAnalyserHandler().GetByteFrequencyData(array.Get(),
+                                             context()->currentTime());
++  // STEALTH PATCH (phase 3): deterministic per-seed noise.
++  PerturbByteArray(array.Get(), 0xB71E9u);
+ }
+ 
+ void AnalyserNode::getFloatTimeDomainData(NotShared<DOMFloat32Array> array) {
+   GetAnalyserHandler().GetFloatTimeDomainData(array.Get());
++  // STEALTH PATCH (phase 3): deterministic per-seed noise.
++  PerturbFloatArray(array.Get(), 0x11E9u);
+ }
+ 
+ void AnalyserNode::getByteTimeDomainData(NotShared<DOMUint8Array> array) {
+   GetAnalyserHandler().GetByteTimeDomainData(array.Get());
++  // STEALTH PATCH (phase 3): deterministic per-seed noise.
++  PerturbByteArray(array.Get(), 0xB11E9u);
+ }
+ 
+ void AnalyserNode::ReportDidCreate() {
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+@@ -4320,8 +4320,11 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
+       return ScriptValue::CreateNull(script_state->GetIsolate());
+     case WebGLDebugRendererInfo::kUnmaskedRendererWebgl:
+       if (ExtensionEnabled(kWebGLDebugRendererInfoName)) {
+-        return WebGLAny(script_state,
+-                        String(ContextGL()->GetString(GL_RENDERER)));
++        // ANDROID STEALTH: expose the Reno7 Snapdragon 778G GPU family.
++        // Keep the Android GLES backend; never claim a desktop D3D device.
++        return WebGLAny(
++            script_state,
++            String("ANGLE (Qualcomm, Adreno (TM) 642L, OpenGL ES 3.2)"));
+       }
+       SynthesizeGLError(
+           GL_INVALID_ENUM, "getParameter",
+@@ -4329,8 +4332,8 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
+       return ScriptValue::CreateNull(script_state->GetIsolate());
+     case WebGLDebugRendererInfo::kUnmaskedVendorWebgl:
+       if (ExtensionEnabled(kWebGLDebugRendererInfoName)) {
+-        return WebGLAny(script_state,
+-                        String(ContextGL()->GetString(GL_VENDOR)));
++        // ANDROID STEALTH: matching Qualcomm vendor for the Adreno profile.
++        return WebGLAny(script_state, String("Google Inc. (Qualcomm)"));
+       }
+       SynthesizeGLError(
+           GL_INVALID_ENUM, "getParameter",
+diff --git a/third_party/blink/renderer/platform/graphics/image_data_buffer.cc b/third_party/blink/renderer/platform/graphics/image_data_buffer.cc
+index 9f62803d..b84303e6 100644
+--- a/third_party/blink/renderer/platform/graphics/image_data_buffer.cc
++++ b/third_party/blink/renderer/platform/graphics/image_data_buffer.cc
+@@ -32,9 +32,12 @@
+ 
+ #include "third_party/blink/renderer/platform/graphics/image_data_buffer.h"
+ 
++#include "base/command_line.h"
+ #include "base/compiler_specific.h"
++#include "base/containers/span.h"
+ #include "base/logging.h"
+ #include "base/memory/ptr_util.h"
++#include "base/strings/string_number_conversions.h"
+ #include "base/types/optional_util.h"
+ #include "third_party/blink/renderer/platform/image-encoders/image_encoder_utils.h"
+ #include "third_party/blink/renderer/platform/wtf/text/base64.h"
+@@ -46,6 +49,72 @@
+ 
+ namespace blink {
+ 
++namespace {
++
++// STEALTH PATCH (phase 3): fingerprint-noise seed; same design as in
++// base_rendering_context_2d.cc. `--stealth-seed=N` overrides the built-in
++// default; the same seed always yields the same noise.
++uint32_t StealthSeed() {
++  static const uint32_t seed = [] {
++    const std::string value =
++        base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
++            "stealth-seed");
++    uint32_t parsed = 0;
++    if (!value.empty() && base::StringToUint(value, &parsed)) {
++      return parsed;
++    }
++    return 0x5EEDC10Au;
++  }();
++  return seed;
++}
++
++// Deterministic 32-bit hash of (seed, x, y); splitmix32-style finalizer.
++uint32_t StealthPixelHash(uint32_t seed, uint32_t x, uint32_t y) {
++  uint32_t h = seed + 0x9E3779B9u + x * 0x85EBCA6Bu + y * 0xC2B2AE35u;
++  h ^= h >> 16;
++  h *= 0x7FEB352Du;
++  h ^= h >> 15;
++  h *= 0x846CA68Bu;
++  h ^= h >> 16;
++  return h;
++}
++
++// Flip the LSB of one channel in ~1/64 of the pixels. Invisible (+/-1),
++// deterministic per (seed, x, y), and identical to the getImageData path,
++// so both readback paths agree with each other.
++void PerturbPixmap(SkPixmap& pixmap) {
++  SkColorType color_type = pixmap.colorType();
++  if (color_type != kRGBA_8888_SkColorType &&
++      color_type != kBGRA_8888_SkColorType) {
++    return;
++  }
++  const uint32_t seed = StealthSeed();
++  const int width = pixmap.width();
++  const int height = pixmap.height();
++  const size_t row_bytes = pixmap.rowBytes();
++  // RGBA_8888 stores R first, BGRA_8888 stores B first. Map the logical
++  // channel through the pixmap's byte order so both readback paths flip
++  // the same channel even when their pixmaps disagree on byte order.
++  const bool is_bgra = (color_type == kBGRA_8888_SkColorType);
++  // The span size comes from the pixmap itself, so this is safe; the
++  // checker cannot verify it, hence the annotation.
++  base::span<uint8_t> bytes = UNSAFE_BUFFERS(base::span<uint8_t>(
++      static_cast<uint8_t*>(pixmap.writable_addr()),
++      pixmap.computeByteSize()));
++  for (int y = 0; y < height; ++y) {
++    for (int x = 0; x < width; ++x) {
++      const uint32_t h = StealthPixelHash(seed, x, y);
++      if (h % 64 == 0) {
++        const int channel = h % 3;
++        bytes[y * row_bytes + x * 4 + (is_bgra ? 2 - channel : channel)] ^=
++            1;
++      }
++    }
++  }
++}
++
++}  // namespace
++
+ ImageDataBuffer::ImageDataBuffer(scoped_refptr<StaticBitmapImage> image) {
+   if (!image)
+     return;
+@@ -98,7 +167,27 @@ ImageDataBuffer::ImageDataBuffer(scoped_refptr<StaticBitmapImage> image) {
+     if (!retained_image_->peekPixels(&pixmap_))
+       return;
+     MSAN_CHECK_MEM_IS_INITIALIZED(pixmap_.addr(), pixmap_.computeByteSize());
++    // STEALTH PATCH (phase 3): pixmap_ aliases the canvas's own pixels
++    // here; make an owned copy so the perturbation below never mutates
++    // the canvas's backing store.
++    const SkImageInfo info = pixmap_.info();
++    const size_t row_bytes = info.minRowBytes();
++    const size_t size = info.computeByteSize(row_bytes);
++    if (SkImageInfo::ByteSizeOverflowed(size))
++      return;
++    sk_sp<SkData> data = SkData::MakeUninitialized(size);
++    SkPixmap owned_pixmap(info, data->writable_data(), row_bytes);
++    if (!paint_image.readPixels(info, owned_pixmap.writable_addr(), row_bytes,
++                                0, 0)) {
++      return;
++    }
++    pixmap_ = owned_pixmap;
++    retained_image_ =
++        SkImages::RasterFromData(info, std::move(data), row_bytes);
+   }
++  // STEALTH PATCH (phase 3): deterministic per-seed pixel noise, identical
++  // to the getImageData path, so both readback paths agree.
++  PerturbPixmap(pixmap_);
+   is_valid_ = true;
+ }
+ 
+diff --git a/third_party/blink/renderer/core/execution_context/navigator_base.cc b/third_party/blink/renderer/core/execution_context/navigator_base.cc
+--- a/third_party/blink/renderer/core/execution_context/navigator_base.cc
++++ b/third_party/blink/renderer/core/execution_context/navigator_base.cc
+@@ -57,20 +57,15 @@ String NavigatorBase::platform() const {
+-  ExecutionContext* execution_context = GetExecutionContext();
+-
+ #if BUILDFLAG(IS_ANDROID)
+-  // For user-agent reduction phase 6, Android platform should be frozen
+-  // string, see https://www.chromium.org/updates/ua-reduction/.
+-  if (RuntimeEnabledFeatures::ReduceUserAgentAndroidVersionDeviceModelEnabled(
+-          execution_context)) {
+-    return GetReducedNavigatorPlatform();
+-  }
++  // ANDROID STEALTH: consistently expose Chromium's frozen Android token.
++  return GetReducedNavigatorPlatform();
+ #else
++  ExecutionContext* execution_context = GetExecutionContext();
+   // For user-agent reduction phase 5, all desktop platform should be frozen
+   // string, see https://www.chromium.org/updates/ua-reduction/.
+   if (RuntimeEnabledFeatures::ReduceUserAgentPlatformOsCpuEnabled(
+           execution_context)) {
+     return GetReducedNavigatorPlatform();
+   }
+ #endif
+ 
+   return NavigatorID::platform();
+ }
