@@ -1,0 +1,212 @@
+name: Build Chromium Android ARM64
+
+on:
+  workflow_dispatch:
+    inputs:
+      chromium_tag:
+        description: 'Chromium version tag (keep 159.0.8149.1 for this patch)'
+        required: true
+        type: string
+        default: '159.0.8149.1'
+
+permissions:
+  contents: read
+
+env:
+  DEPOT_TOOLS_UPDATE: '0'
+  CHROMIUM_OUT: 'out/Android'
+
+jobs:
+  build-android-arm64:
+    # Standard GitHub-hosted Linux runner. Public repositories receive
+    # the larger standard public-runner specification when available.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      # 1) Remove preinstalled SDKs/toolchains that this build will fetch itself.
+      # Chromium's own hooks install the Android SDK/NDK versions it needs.
+      - name: Free preinstalled disk space
+        uses: endersonmenezes/free-disk-space@v4
+        with:
+          remove_android: true
+          remove_dotnet: true
+          remove_haskell: true
+
+      # 2) Show actual remaining space. The cleanup helps, but may not reach
+      # Chromium's official 100 GB recommendation on a standard runner.
+      - name: Check runner capacity after cleanup
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '=== Runner ==='
+          uname -a
+          echo
+          echo '=== Memory ==='
+          free -h || true
+          echo
+          echo '=== Disk after cleanup ==='
+          df -h /
+          FREE_GB="$(df -BG --output=avail / | tail -n 1 | tr -dc '0-9')"
+          MEM_GB="$(awk '/MemTotal/ {printf "%d", $2/1024/1024}' /proc/meminfo)"
+          echo "Available disk: ${FREE_GB} GB"
+          echo "RAM: ${MEM_GB} GB"
+          if [ -z "$FREE_GB" ]; then
+            echo '::error title=Disk check failed::Could not read available disk space.'
+            exit 1
+          fi
+          if [ "$FREE_GB" -lt 100 ]; then
+            echo '::warning title=Disk below Chromium recommendation::Chromium officially recommends at least 100 GB free. This workflow will try anyway, but it may run out of disk and fail.'
+          fi
+          if [ "$MEM_GB" -lt 16 ]; then
+            echo '::warning title=Low memory::Chromium recommends more than 16 GB RAM. The build will use fewer parallel jobs.'
+          fi
+
+      # 3) Get the two files you uploaded to your GitHub repository.
+      - name: Checkout repository (patch + workflow)
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check Android patch file
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -s "$GITHUB_WORKSPACE/android_stealth.patch" ]; then
+            echo '::error title=Patch missing::Upload android_stealth.patch to the ROOT of your repository.'
+            exit 1
+          fi
+          echo 'Patch file found:'
+          ls -lh "$GITHUB_WORKSPACE/android_stealth.patch"
+          git apply --stat "$GITHUB_WORKSPACE/android_stealth.patch"
+
+      # 4) Install depot_tools and fetch the exact Chromium version.
+      - name: Install and bootstrap depot_tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          DEPOT_TOOLS_DIR="$RUNNER_TEMP/depot_tools"
+          git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git "$DEPOT_TOOLS_DIR"
+          chmod +x "$DEPOT_TOOLS_DIR/ensure_bootstrap"
+          # DEPOT_TOOLS_UPDATE=0 prevents self-update, but does not initialize
+          # the bundled Python. Bootstrap it explicitly before calling fetch.
+          "$DEPOT_TOOLS_DIR/ensure_bootstrap"
+          if [ ! -s "$DEPOT_TOOLS_DIR/python3_bin_reldir.txt" ]; then
+            echo '::error title=depot_tools bootstrap failed::python3_bin_reldir.txt was not created.'
+            exit 1
+          fi
+          "$DEPOT_TOOLS_DIR/python-bin/python3" --version
+          echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
+
+      - name: Fetch Chromium source
+        shell: bash
+        env:
+          CHROMIUM_TAG: ${{ inputs.chromium_tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/chromium-checkout"
+          cd "$RUNNER_TEMP/chromium-checkout"
+          fetch --nohooks --no-history android
+          cd src
+          TAG_REF="refs/tags/${CHROMIUM_TAG}"
+          git fetch --depth=1 origin "${TAG_REF}:${TAG_REF}"
+          git checkout --detach "$TAG_REF"
+          echo "Checked out Chromium tag: ${CHROMIUM_TAG}"
+          echo "CHROMIUM_SRC=$PWD" >> "$GITHUB_ENV"
+
+      - name: Sync Chromium dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$CHROMIUM_SRC"
+          gclient sync --no-history --nohooks
+
+      # 5) Install Linux dependencies and let Chromium fetch its pinned SDK/NDK.
+      - name: Install build dependencies
+        shell: bash
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          set -euo pipefail
+          cd "$CHROMIUM_SRC"
+          sudo -E build/install-build-deps.sh
+
+      - name: Download Chromium build tools and Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$CHROMIUM_SRC"
+          gclient runhooks
+
+      # 6) Test the patch against this exact Chromium checkout before applying it.
+      - name: Check and apply android_stealth.patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$CHROMIUM_SRC"
+          git apply --check "$GITHUB_WORKSPACE/android_stealth.patch"
+          git apply "$GITHUB_WORKSPACE/android_stealth.patch"
+          git diff --check
+          echo 'Patch applied successfully.'
+          git diff --stat
+
+      # 7) Generate a release ARM64 Android build.
+      - name: Generate ARM64 build configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$CHROMIUM_SRC"
+          gn gen "$CHROMIUM_OUT" --args='
+            target_os = "android"
+            target_cpu = "arm64"
+            is_debug = false
+            is_component_build = false
+            symbol_level = 0
+            blink_symbol_level = 0
+            v8_symbol_level = 0
+            use_remoteexec = false
+          '
+
+      - name: Build Chrome APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$CHROMIUM_SRC"
+          MEM_KB="$(awk '/MemTotal/ {print $2}' /proc/meminfo)"
+          if [ "$MEM_KB" -lt 20000000 ]; then
+            JOBS=2
+          else
+            JOBS="$(nproc)"
+            [ "$JOBS" -gt 4 ] && JOBS=4
+          fi
+          echo "Building chrome_public_apk with ${JOBS} parallel jobs"
+          autoninja -C "$CHROMIUM_OUT" -j"$JOBS" chrome_public_apk
+
+      # 8) Rename ChromePublic.apk to the easy-to-find chrome.apk filename.
+      - name: Prepare APK for download
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$CHROMIUM_SRC"
+          APK="$CHROMIUM_OUT/apks/ChromePublic.apk"
+          if [ ! -s "$APK" ]; then
+            echo '::error title=APK not found::Build ended but ChromePublic.apk was not found.'
+            echo 'APK files found in output directory:'
+            find "$CHROMIUM_OUT" -type f -name '*.apk' -print || true
+            exit 1
+          fi
+          mkdir -p "$GITHUB_WORKSPACE/artifact"
+          cp "$APK" "$GITHUB_WORKSPACE/artifact/chrome.apk"
+          sha256sum "$GITHUB_WORKSPACE/artifact/chrome.apk" > "$GITHUB_WORKSPACE/artifact/SHA256SUMS.txt"
+          printf 'Chromium tag: %s\nAndroid ABI: arm64-v8a\nBuild target: chrome_public_apk\n' \
+            '${{ inputs.chromium_tag }}' > "$GITHUB_WORKSPACE/artifact/BUILD_INFO.txt"
+          ls -lh "$GITHUB_WORKSPACE/artifact/"
+
+      # 9) GitHub will show this under the run's Artifacts section.
+      - name: Upload chrome.apk Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: chrome-apk
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 7
