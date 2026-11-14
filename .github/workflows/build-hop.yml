@@ -12,10 +12,18 @@ name: Build hop (resumable Chromium Android)
 # a time box, and then either uploads the finished APK or packages the new
 # build state for the next hop.
 #
-# The dispatcher reads each hop's outputs and dispatches the next:
-#   resume-from = hop-state-<run_number>   (from the previous hop's summary)
-#   resume-run-id = <run id of the previous hop>
+# The chain runs ITSELF inside GitHub — no external dispatcher, no
+# babysitting. Each hop's last step dispatches its own successor with
+# GITHUB_TOKEN (workflow_dispatch is one of the two documented exceptions
+# to "GITHUB_TOKEN events don't trigger workflows"). The next hop resumes
+# from this hop's state:
+#   resume-from = hop-state-<run_number>   (this hop's state prefix)
+#   resume-run-id = <this hop's run id>
 # State artifact names: hop-state-<run#>-part-00.. (-part-07), -manifest.
+# The chain stops by itself when: the APK is produced (done=true), a hop
+# fails or packages no state (state=none — a human must look first), or
+# hop-index reaches max-hops (default 20, safety cap against runaway).
+# Set auto-chain=false to go back to manual dispatch (the iNWEB way).
 #
 # Why this shape (each point is a measured iNWEB lesson, not a guess):
 # - NO actions/cache: the 10 GB/repo cache cap cannot hold a Chromium build
@@ -56,10 +64,25 @@ on:
         required: true
         type: string
         default: "159.0.8149.1"
+      hop-index:
+        description: "this hop's number in the chain (auto-incremented on self-dispatch; 1 = first hop)"
+        type: number
+        default: 1
+      max-hops:
+        description: "safety cap: the chain stops dispatching after this many hops"
+        type: number
+        default: 20
+      auto-chain:
+        description: "true = this hop dispatches its own successor when it packaged state (false = manual dispatch)"
+        type: boolean
+        default: true
 
 permissions:
   contents: read
-  actions: read   # cross-run artifact download (resuming a previous hop's state)
+  # actions: write = self-dispatch the next hop via the API (workflow_dispatch
+  # triggered by GITHUB_TOKEN *does* create a new run — documented exception)
+  # plus the cross-run artifact download used when resuming state.
+  actions: write
 
 concurrency:
   group: build-hop
@@ -70,7 +93,7 @@ env:
 
 jobs:
   hop:
-    name: "hop ${{ github.run_number }} (resume: ${{ inputs.resume-from || 'fresh' }})"
+    name: "hop ${{ inputs.hop-index }} (run ${{ github.run_number }}, resume: ${{ inputs.resume-from || 'fresh' }})"
     runs-on: ubuntu-24.04
     timeout-minutes: 350
     outputs:
@@ -458,18 +481,61 @@ jobs:
             echo
             echo "## Next hop"
             echo
-            if [ "${{ steps.verdict.outputs.state }}" != "none" ] && [ -n "${{ steps.verdict.outputs.state }}" ]; then
-              echo "Dispatch the next hop with:"
+            if [ "${{ steps.verdict.outputs.done }}" = "true" ]; then
+              echo "APK produced — the chain is complete. No further hop is dispatched."
+            elif [ "${{ steps.verdict.outputs.state }}" != "none" ] && [ -n "${{ steps.verdict.outputs.state }}" ]; then
+              if [ "${{ inputs.auto-chain }}" = "true" ] && [ "${{ inputs.probe-dryrun }}" != "true" ]; then
+                echo "Auto-chain is on: this hop dispatches hop $((${{ inputs.hop-index }} + 1)) itself with:"
+              else
+                echo "Dispatch the next hop manually with:"
+              fi
               echo "- resume-from: \`${{ steps.verdict.outputs.state }}\`"
               echo "- resume-run-id: \`${GITHUB_RUN_ID}\`"
+              echo "- hop-index: \`$((${{ inputs.hop-index }} + 1))\`"
             else
-              echo "No resumable state from this hop — check the verdict above."
+              echo "No resumable state from this hop — the chain stops here. Check the verdict above."
             fi
             echo
             grep -E "^(APK|STATE|RESUME|TAG): " hop-logs/*.txt hop-logs/*.log 2>/dev/null | head -10 || true
             tail -5 hop-logs/40-postbuild.txt 2>/dev/null || true
           } | tee hop-logs/99-summary.md
           cat hop-logs/99-summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      # ---- self-chaining: the hop dispatches its own successor --------------
+      # Runs AFTER the state artifacts are uploaded, so the next hop can
+      # always download them. The concurrency group makes the next hop wait
+      # for this run to finish (logs upload) before it starts.
+      # Guards — any one stops the chain, safely, with state still uploaded:
+      # done=true (APK built), state=none (failed hop / probe / no state),
+      # hop-index >= max-hops (cap), auto-chain=false (manual mode).
+      - name: Dispatch next hop (self-chaining)
+        if: ${{ always() && inputs.auto-chain && inputs.probe-dryrun != true && steps.verdict.outputs.done != 'true' && steps.verdict.outputs.state != 'none' && steps.verdict.outputs.state != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          HOP_INDEX=${{ inputs.hop-index }}
+          MAX_HOPS=${{ inputs.max-hops }}
+          NEXT_HOP=$((HOP_INDEX + 1))
+          if [ "$HOP_INDEX" -ge "$MAX_HOPS" ]; then
+            {
+              echo "CHAIN: STOP — hop $HOP_INDEX reached the max-hops cap ($MAX_HOPS). No dispatch."
+              echo "Raise max-hops and dispatch the next hop manually to continue."
+            } | tee hop-logs/50-chain.txt
+            exit 0
+          fi
+          echo "CHAIN: dispatching hop $NEXT_HOP (resume-from=${{ steps.verdict.outputs.state }}, resume-run-id=${GITHUB_RUN_ID})" | tee hop-logs/50-chain.txt
+          gh api -X POST "repos/${GH_REPO}/actions/workflows/build-hop.yml/dispatches" \
+            -f "ref=${{ github.ref_name }}" \
+            -f "inputs[resume-from]=${{ steps.verdict.outputs.state }}" \
+            -f "inputs[resume-run-id]=${GITHUB_RUN_ID}" \
+            -f "inputs[hop-index]=${NEXT_HOP}" \
+            -f "inputs[max-hops]=${MAX_HOPS}" \
+            -f "inputs[build-minutes]=${{ inputs.build-minutes }}" \
+            -f "inputs[ninja-jobs]=${{ inputs.ninja-jobs }}" \
+            -f "inputs[chromium_tag]=${{ inputs.chromium_tag }}" \
+            -f "inputs[auto-chain]=true"
+          echo "CHAIN: hop $NEXT_HOP dispatched." | tee -a hop-logs/50-chain.txt
 
       - name: Upload hop logs
         if: ${{ always() }}
