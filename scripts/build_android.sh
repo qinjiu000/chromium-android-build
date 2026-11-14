@@ -20,7 +20,19 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-ARGS_FILE="$ROOT/config/chromium/args-development.gn"
+# Build variant, from the workflow (CAB_BUILD_TYPE env). development is the
+# default so a bare local run behaves exactly as before this variable
+# existed. release uses args-release.gn and out/release.
+CAB_BUILD_TYPE="${CAB_BUILD_TYPE:-development}"
+case "$CAB_BUILD_TYPE" in
+  development|release) ;;
+  *)
+    echo "ERROR: unknown CAB_BUILD_TYPE '$CAB_BUILD_TYPE' (want development or release)" >&2
+    exit 2
+    ;;
+esac
+
+ARGS_FILE="$ROOT/config/chromium/args-${CAB_BUILD_TYPE}.gn"
 if [ ! -f "$ARGS_FILE" ]; then
   echo "ERROR: missing GN args file: $ARGS_FILE" >&2
   exit 2
@@ -54,7 +66,7 @@ git diff --check ||
 echo "Patch applied:"
 git diff --stat | tail -3
 
-OUT_DIR="out/development"
+OUT_DIR="out/${CAB_BUILD_TYPE}"
 
 # mtime discipline, part 2 — the part that actually works (iNWEB hops 29/30).
 #
@@ -78,7 +90,7 @@ gn gen "$OUT_DIR" --args="$(cat "$ARGS_FILE")" ||
 {
   echo "chromium_tag=${CHROMIUM_TAG:-$(sed -n 's/^CHROMIUM_TAG=//p' "$ROOT/config/chromium/BASELINE" | tr -d '[:space:]')}"
   echo "chromium_head=$(git rev-parse HEAD)"
-  echo "channel=development"
+  echo "channel=${CAB_BUILD_TYPE}"
   echo "gn_args_file=$ARGS_FILE"
   echo "built_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 } > "$OUT_DIR/cab_build_metadata.txt"
@@ -87,7 +99,7 @@ gn gen "$OUT_DIR" --args="$(cat "$ARGS_FILE")" ||
 # hard-require AUTONINJA_BUILD_ID even under plain ninja — without it they
 # raise "AUTONINJA_BUILD_ID is not set ... requires autoninja integration"
 # (hit at iNWEB hop 13, edge ~10390). This repo sets
-# android_static_analysis="off" in args-development.gn, which removes those
+# android_static_analysis="off" in both args files, which removes those
 # steps; the ID is still exported as belt-and-braces. With the ID set but
 # no AUTONINJA_STDOUT_NAME, server_utils.MaybeRunCommand deliberately falls
 # back to normal LOCAL execution.

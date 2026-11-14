@@ -1,0 +1,46 @@
+# =============================================================================
+# GN arguments: RELEASE channel (optimized build)
+#
+# Same shape as args-development.gn, with the debug switches flipped:
+# is_debug=false (compiler optimizations on) and symbol_level=0 (no debug
+# symbols). Deliberately NOT an official build: is_official_build stays
+# unset (ThinLTO/PGO), which no public free-runner Android chain has ever
+# verified. This is the "optimized but not official" middle ground.
+#
+# Reference: upstream docs/android_build_instructions.md
+# =============================================================================
+
+# Android target on an x86-64 Linux build host, 64-bit ARM device target.
+target_os = "android"
+target_cpu = "arm64"
+
+# Optimized build, no debug symbols. Release compiles are slower per file
+# (optimizations on) and use more memory per translation unit than the
+# debug config, so a release chain needs more hops than the debug chain.
+# NOTE: component builds are disallowed on Android upstream
+# (BUILDCONFIG.gn asserts !(current_os == "android" && is_component_build))
+# — is_component_build must NEVER be set here.
+is_debug = false
+symbol_level = 0
+
+# Distribution outside Play Store during development.
+android_channel = "default"
+
+# Same as the development config (verified against the Chromium 159 tree,
+# build/config/android/config.gni): turn the Java static-analysis steps off.
+# iNWEB hit hop 13's AUTONINJA_BUILD_ID failure in exactly those steps
+# (android_static_analysis=build_server Java validate_deps). "off" is the
+# same value is_official_build selects, and it removes the failing steps
+# instead of working around them. build_android.sh still exports
+# AUTONINJA_BUILD_ID as belt-and-braces.
+android_static_analysis = "off"
+
+# Deliberately NOT set:
+# - is_official_build: would enable ThinLTO/PGO — never publicly verified
+#   on free runners; leave unset.
+# - enable_nacl: removed from the Chromium tree (no such arg in 159);
+#   passing it would fail gn gen.
+# - blink_symbol_level / v8_symbol_level: left at their defaults, which
+#   follow symbol_level=0.
+# - is_java_debug: defaults to is_debug (false here).
+# - use_thin_lto: defaults off for non-official builds; leave alone.

@@ -6,9 +6,11 @@ name: Verify (no compile)
 # Adapted from iNWEB-Browser's b001-verify.yml (separation of concerns).
 #
 #   fetch pinned tree (~10-15 min) -> tag verify -> patch apply/verify
+#   -> gn gen both args files (development + release, gen only, no compile)
 #
-# Total ~35-60 min, no out/ state, no APK, no compile. Its PASS says the
-# chain's inputs are sound; it says nothing about the compile itself — the
+# Total ~40-65 min, no out/ state, no APK, no compile. Its PASS says the
+# chain's inputs are sound — including that both GN args files are accepted
+# by the pinned tree's gn; it says nothing about the compile itself — the
 # build-hop chain remains the only evidence source for that.
 #
 # The expensive chain (build-hop.yml) is dispatched ONLY deliberately, as
@@ -114,16 +116,40 @@ jobs:
             echo "PATCHES: PASS"
           } 2>&1 | tee verify-logs/40-patches.txt
 
+      # ---- stage: GN args validation (gen only, no compile) ---------------
+      # gn gen fails on unknown/invalid args, so a PASS here proves both
+      # args files are accepted by the pinned tree. No compile happens:
+      # the out/verify-* dirs are throwaway gen output, discarded with the
+      # runner. The Android SDK comes from the gclient sync hooks
+      # (third_party/android_sdk), so no extra install step is needed.
+      - name: Validate GN args (gn gen, no compile)
+        id: gnargs
+        if: ${{ always() && steps.fetch.outcome == 'success' && steps.tag.outcome == 'success' }}
+        timeout-minutes: 20
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          {
+            export PATH="$PWD/chromium/depot_tools:$PATH"
+            cd chromium/src
+            for BT in development release; do
+              echo "--- gn gen out/verify-$BT (args-$BT.gn) ---"
+              gn gen "out/verify-$BT" --args="$(cat "$GITHUB_WORKSPACE/config/chromium/args-$BT.gn")"
+              echo "gn gen $BT: OK"
+            done
+            echo "GNARGS: PASS"
+          } 2>&1 | tee "$GITHUB_WORKSPACE/verify-logs/50-gnargs.txt"
+
       - name: Verdict
         if: ${{ always() }}
         run: |
           {
             echo "event=${GITHUB_EVENT_NAME} chromium_tag=${CHROMIUM_TAG}"
-            grep -h "TAG:\|PATCHES:" verify-logs/*.txt 2>/dev/null || echo "(no stage verdicts)"
+            grep -h "TAG:\|PATCHES:\|GNARGS:" verify-logs/*.txt 2>/dev/null || echo "(no stage verdicts)"
             echo "COMPILE: NONE (this job never compiles — compile evidence lives in the build-hop chain only)"
           } | tee verify-logs/99-verdict.txt
           cat verify-logs/99-verdict.txt >> "$GITHUB_STEP_SUMMARY"
-          if [ "${{ steps.fetch.outcome }}" != "success" ] || [ "${{ steps.tag.outcome }}" != "success" ] || [ "${{ steps.patches.outcome }}" != "success" ]; then
+          if [ "${{ steps.fetch.outcome }}" != "success" ] || [ "${{ steps.tag.outcome }}" != "success" ] || [ "${{ steps.patches.outcome }}" != "success" ] || [ "${{ steps.gnargs.outcome }}" != "success" ]; then
             echo "VERIFY: FAILED (see stage verdicts above)"
             exit 1
           fi
