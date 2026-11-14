@@ -35,17 +35,27 @@ verified full Android Chromium build on free runners):
 
 ## How to run the chain
 
+The chain runs itself inside GitHub — dispatch hop 1 and walk away:
+
 1. **Hop 1 (fresh):** Actions → *Build hop (resumable Chromium Android)* →
    Run workflow. Leave `resume-from` and `resume-run-id` empty.
-2. When a hop finishes **without** an APK, its summary prints the next hop's
-   inputs: `resume-from: hop-state-<run_number>` and the run id. Dispatch
-   the next hop with those two values filled in.
-3. Repeat until a hop uploads `hop-apk-<n>` — that run's Artifacts section
-   holds the APK.
-4. State artifacts expire after 5 days; dispatch the next hop promptly.
-   Public-repo Actions minutes are free — wall-clock time is the constraint,
-   not minutes. (iNWEB's 154 chain: 14 hops, ~45 h runner time, ~21 h genuine
-   compile.)
+2. Each hop's last step dispatches its own successor with `GITHUB_TOKEN`
+   (`workflow_dispatch` is a documented exception to "`GITHUB_TOKEN`
+   events don't trigger workflows"). The next hop resumes from the state
+   artifacts the previous hop uploaded. No external dispatcher, no
+   babysitting.
+3. The chain stops by itself when a hop uploads `hop-apk-<n>` (that run's
+   Artifacts section holds the APK), when a hop fails or packages no state
+   (a human must look before anything resumes), or at the `max-hops` safety
+   cap (default 20). Set `auto-chain=false` to dispatch hops manually the
+   old way — each hop's summary prints the next hop's inputs
+   (`resume-from: hop-state-<run_number>`, the run id, and the next
+   `hop-index`).
+4. State artifacts expire after 5 days; the self-chaining dispatch happens
+   within minutes of each hop finishing, so expiry is only a risk if the
+   chain stops on a failure. Public-repo Actions minutes are free —
+   wall-clock time is the constraint, not minutes. (iNWEB's 154 chain:
+   14 hops, ~45 h runner time, ~21 h genuine compile.)
 
 ## Verify workflow (no compile)
 
