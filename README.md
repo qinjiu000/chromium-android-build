@@ -31,14 +31,22 @@ verified full Android Chromium build on free runners):
   every input as changed and re-executes the graph.
 - **Debug build** (`is_debug=true`, `symbol_level=1`): the only config with a
   public free-runner success. No official (ThinLTO/PGO) Android build on free
-  runners has ever been publicly verified.
+  runners has ever been publicly verified. A **release variant** is also
+  supported (`is_debug=false`, `symbol_level=0`, still not official) — it
+  compiles slower per file, so a release chain needs more hops.
 
 ## How to run the chain
 
 The chain runs itself inside GitHub — dispatch hop 1 and walk away:
 
 1. **Hop 1 (fresh):** Actions → *Build hop (resumable Chromium Android)* →
-   Run workflow. Leave `resume-from` and `resume-run-id` empty.
+   Run workflow. Leave `resume-from` and `resume-run-id` empty. For a
+   release build, set `build-type` to `release` (or via CLI:
+   `gh workflow run build-hop.yml -f build-type=release`); the default
+   `development` builds the debug APK. A chain never switches variant
+   mid-way — the self-dispatch passes `build-type` through unchanged, and
+   release chains use separate state/APK prefixes (`hop-state-release-*`,
+   `hop-apk-release-*`).
 2. Each hop's last step dispatches its own successor with `GITHUB_TOKEN`
    (`workflow_dispatch` is a documented exception to "`GITHUB_TOKEN`
    events don't trigger workflows"). The next hop resumes from the state
@@ -60,10 +68,11 @@ The chain runs itself inside GitHub — dispatch hop 1 and walk away:
 ## Verify workflow (no compile)
 
 `Verify (no compile)` runs the cheap stages only — fetch the pinned tree,
-verify the tag, apply the patch — in ~35–60 min. It runs automatically on
-pushes that touch the patch, the scripts, or `config/chromium/`, and can also
-be dispatched manually. Its PASS says the chain's inputs are sound; it says
-nothing about the compile itself.
+verify the tag, apply the patch, and `gn gen` both args files
+(`args-development.gn`, `args-release.gn`) — in ~40–65 min. It runs
+automatically on pushes that touch the patch, the scripts, or
+`config/chromium/`, and can also be dispatched manually. Its PASS says the
+chain's inputs are sound; it says nothing about the compile itself.
 
 ## Files
 
@@ -72,6 +81,7 @@ nothing about the compile itself.
 | `android_stealth.patch` | Stealth patch series, targets Chromium **159.0.8149.1** exactly |
 | `config/chromium/BASELINE` | Pinned Chromium tag (`CHROMIUM_TAG=159.0.8149.1`) |
 | `config/chromium/args-development.gn` | GN args: debug build, arm64, `chrome_public_apk` |
+| `config/chromium/args-release.gn` | GN args: optimized build (not official), arm64, `chrome_public_apk` |
 | `scripts/fetch_chromium.sh` | Pinned depot_tools + `gclient sync` directly at the tag |
 | `scripts/build_android.sh` | Apply patch → normalize mtimes → `gn gen` → plain ninja |
 | `.github/workflows/build-hop.yml` | The resumable hop chain |
