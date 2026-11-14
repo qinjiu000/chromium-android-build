@@ -1,0 +1,7 @@
+# Pinned upstream Chromium baseline.
+# Consumed by scripts/fetch_chromium.sh, scripts/build_android.sh,
+# and the build-hop / verify workflows.
+# Keep in sync with the `chromium_tag` workflow input default.
+# The android_stealth.patch in this repo targets exactly this tag.
+CHROMIUM_TAG=159.0.8149.1
+PINNED_ON=2026-11-13
