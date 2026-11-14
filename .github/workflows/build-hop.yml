@@ -1,0 +1,481 @@
+name: Build hop (resumable Chromium Android)
+
+# =============================================================================
+# Resumable chained build hops on GitHub-hosted runners, following the
+# publicly verified iNWEB-Browser chain (B-001, Chromium 154, 14 hops,
+# chrome_public_apk completed 2026-09-22 on free ubuntu-24.04 runners).
+#
+# One dispatch = one hop. A hop: re-fetches the pinned tree (~15 min),
+# reinstalls the Android deps, RESUMES the previous hop's out/ build state
+# (transferred as tar.zstd split into <=4 GiB artifacts, mtimes preserved by
+# tar so plain ninja resumes cleanly), runs scripts/build_android.sh inside
+# a time box, and then either uploads the finished APK or packages the new
+# build state for the next hop.
+#
+# The dispatcher reads each hop's outputs and dispatches the next:
+#   resume-from = hop-state-<run_number>   (from the previous hop's summary)
+#   resume-run-id = <run id of the previous hop>
+# State artifact names: hop-state-<run#>-part-00.. (-part-07), -manifest.
+#
+# Why this shape (each point is a measured iNWEB lesson, not a guess):
+# - NO actions/cache: the 10 GB/repo cache cap cannot hold a Chromium build
+#   (tree ~30 GB, meaningful ccache 20-50 GB). State travels as artifacts.
+# - Plain ninja, never autoninja/siso: siso's incremental state does not
+#   survive the out/ transfer (iNWEB hops 4-7 wasted ~14 h re-executing
+#   ~30k edges per box before switching to ninja at hop 9).
+# - mtime normalization to 2020-01-01 (out/ excluded), applied twice: once
+#   in this workflow after the fetch, once inside build_android.sh AFTER
+#   the patch is applied (patched files get fresh mtimes otherwise, and
+#   ninja re-executes the graph instead of resuming — iNWEB hops 29/30).
+# - Debug build (is_debug=true, symbol_level=1): the only config with a
+#   public free-runner success. No official (ThinLTO/PGO) Android build on
+#   free runners has ever been publicly verified.
+# =============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      resume-from:
+        description: "state artifact prefix from the previous hop (empty = fresh compile)"
+        default: ""
+      build-minutes:
+        description: "minutes the build may run before being boxed"
+        default: 265
+      resume-run-id:
+        description: "run id that owns the resume-state artifacts (required with resume-from)"
+        default: ""
+      ninja-jobs:
+        description: "ninja -j parallelism (default 6; 4-vCPU/16-GB runner — higher values risk compile OOM)"
+        default: 6
+      probe-dryrun:
+        description: "true = run ninja in plan-only mode and report the would-build count (no compile, no state repackage)"
+        type: boolean
+        default: false
+      chromium_tag:
+        description: "Chromium version tag (keep 159.0.8149.1 — android_stealth.patch targets it)"
+        required: true
+        type: string
+        default: "159.0.8149.1"
+
+permissions:
+  contents: read
+  actions: read   # cross-run artifact download (resuming a previous hop's state)
+
+concurrency:
+  group: build-hop
+  cancel-in-progress: false
+
+env:
+  CHROMIUM_TAG: ${{ inputs.chromium_tag }}
+
+jobs:
+  hop:
+    name: "hop ${{ github.run_number }} (resume: ${{ inputs.resume-from || 'fresh' }})"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    outputs:
+      done: ${{ steps.verdict.outputs.done }}
+      state: ${{ steps.verdict.outputs.state }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Record facts (build-id = commit SHA, hop mode)
+        run: |
+          mkdir -p hop-logs
+          {
+            echo "commit_sha=$(git rev-parse HEAD)"
+            echo "run_id=${GITHUB_RUN_ID} run_number=${GITHUB_RUN_NUMBER} attempt=${GITHUB_RUN_ATTEMPT}"
+            echo "date_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "chromium_tag=${{ inputs.chromium_tag }}"
+            echo "resume_from=${{ inputs.resume-from }}"
+            echo "build_minutes=${{ inputs.build-minutes }}"
+            echo "image_os=${ImageOS:-unknown} image_version=${ImageVersion:-unknown}"
+            echo "nproc=$(nproc)"
+            head -1 /proc/meminfo
+          } | tee hop-logs/00-facts.txt
+          df -h / | tee -a hop-logs/00-facts.txt
+
+      # Standard, documented runner-disk reclamation (preinstalled toolchain
+      # images this job does not use; nothing project-related).
+      - name: Free preinstalled toolchain space (documented)
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /usr/local/.ghcup /usr/local/share/boost /opt/hostedtoolcache/CodeQL \
+            /usr/lib/jvm /usr/local/share/chromium 2>/dev/null || true
+          sudo docker system prune -af >/dev/null 2>&1 || true
+          df -h / | tee hop-logs/05-disk.txt
+
+      # Runner tuning (not project config): the final monolithic links
+      # (libmonochrome et al.) need more memory than the 16 GiB runner has;
+      # a swapfile on the runner disk keeps lld alive at link-speed cost.
+      - name: Add swap headroom for the final links (documented runner tuning)
+        run: |
+          if ! sudo swapon --show | grep -q .; then
+            sudo fallocate -l 14G /swapfile
+            sudo chmod 600 /swapfile
+            sudo mkswap /swapfile >/dev/null
+            sudo swapon /swapfile
+          fi
+          free -h | tee -a hop-logs/00-facts.txt
+
+      - name: Fetch pinned Chromium (fetch_chromium.sh)
+        id: fetch
+        # iNWEB hop 32's gclient stalled and hit a 75-minute cap, leaving a
+        # partial tree that no step detected. The cap is raised and the tag
+        # step below verifies the tree before anything builds on it.
+        timeout-minutes: 150
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          bash scripts/fetch_chromium.sh 2>&1 | tee hop-logs/10-fetch.log
+
+      - name: Verify pinned tag (compact)
+        id: tag
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          WS="$PWD/chromium"
+          EXPECTED="${CHROMIUM_TAG}"
+          HEAD_SHA=$(git -C "$WS/src" rev-parse HEAD 2>/dev/null || echo none)
+          REMOTE_SHA=$(git -C "$WS/src" ls-remote origin "refs/tags/$EXPECTED^{}" "refs/tags/$EXPECTED" 2>/dev/null | grep -v '\^{}' | head -1 | cut -f1 || true)
+          VERSION=$(sed -n 's/^MAJOR=//p;s/^MINOR=//p;s/^BUILD=//p;s/^PATCH=//p' "$WS/src/chrome/VERSION" 2>/dev/null | paste -sd. || true)
+          echo "expected=$EXPECTED head=$HEAD_SHA remote_tag=$REMOTE_SHA chrome_version=$VERSION" | tee hop-logs/15-tag.txt
+          if [ "$HEAD_SHA" = "none" ] || [ -z "$REMOTE_SHA" ] || [ "$HEAD_SHA" != "$REMOTE_SHA" ] || [ "$VERSION" != "$EXPECTED" ]; then
+            echo "TAG: FAIL/BLOCKED (see above line)" | tee -a hop-logs/15-tag.txt
+            exit 1
+          fi
+          echo "TAG: PASS" | tee -a hop-logs/15-tag.txt
+
+      - name: Install Chromium Android build dependencies
+        id: deps
+        timeout-minutes: 25
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          sudo bash chromium/src/build/install-build-deps.sh --android --no-arm 2>&1 | tee hop-logs/20-deps.log
+
+      # ---- resume: manifest first, then all parts (flat merge) -------------
+      - name: Download previous hop state manifest (cross-run)
+        if: ${{ inputs.resume-from != '' }}
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.resume-from }}-manifest
+          run-id: ${{ inputs.resume-run-id }}
+          github-token: ${{ github.token }}
+          path: state-in
+
+      - name: Download previous hop state parts (cross-run)
+        if: ${{ inputs.resume-from != '' }}
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ${{ inputs.resume-from }}-part-*
+          run-id: ${{ inputs.resume-run-id }}
+          github-token: ${{ github.token }}
+          merge-multiple: true
+          path: state-in
+
+      - name: Verify and extract resumed build state
+        id: resume
+        if: ${{ inputs.resume-from != '' }}
+        timeout-minutes: 45
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          {
+            ls -lh state-in/ || true
+            if [ ! -f state-in/manifest.sha256 ]; then
+              echo "RESUME: FAIL — manifest missing"; exit 1
+            fi
+            (cd state-in && sha256sum -c manifest.sha256)
+            cat state-in/part-* > state.tar.zst
+            mkdir -p chromium/src/out
+            tar --zstd -xf state.tar.zst -C chromium/src/out
+            echo "RESUME: PASS"
+            echo "--- resumed out/ size / object count ---"
+            du -sh chromium/src/out/development || true
+            find chromium/src/out/development -name '*.o' 2>/dev/null | wc -l
+          } 2>&1 | tee hop-logs/25-resume.log
+
+      # ---- mtime discipline: make the resumed state RESUMABLE ---------------
+      # Each hop re-fetches the tree, giving every source a NEW mtime; the
+      # resumed out/ artifacts keep their ORIGINAL (older) build mtimes, so
+      # a mtime/size-based incremental builder (ninja restat) sees "every
+      # input changed" and re-executes the whole graph. Normalizing every
+      # source to a FIXED past date (out/ excluded) makes inputs permanently
+      # "not newer" than the artifacts, so ninja resumes genuinely.
+      # (build_android.sh normalizes AGAIN after applying the patch, because
+      # the patch rewrites patched files with current mtimes.)
+      - name: Normalize source mtimes (fixed epoch; out/ excluded)
+        id: normalize
+        if: ${{ steps.fetch.outcome == 'success' }}
+        timeout-minutes: 15
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          {
+            date -u
+            find chromium -path 'chromium/src/out' -prune -o \
+              -exec touch -h -c -d '2020-01-01 00:00:00 UTC' {} +
+            echo "normalized: all tree mtimes -> 2020-01-01 (out/ excluded)"
+            echo "--- sanity: sources must all be <= 2020-01-01 ---"
+            find chromium -path 'chromium/src/out' -prune -o -newermt '2020-01-02' -print | head -5
+            echo "--- sanity: out artifacts (sample) are newer ---"
+            find chromium/src/out/development -type f -newermt '2020-01-02' 2>/dev/null | head -3
+          } 2>&1 | tee hop-logs/26-normalize.log
+
+      # ---- the build (plain ninja; resumes transferred out/ state) ---------
+      - name: Boxed build (build_android.sh)
+        id: build
+        # Never build on a tree that did not arrive: iNWEB hop 32 ran the
+        # build after the fetch timed out, and the patch conflicted on an
+        # incomplete checkout instead of saying so.
+        if: ${{ steps.fetch.outcome == 'success' && steps.tag.outcome == 'success' && (inputs.resume-from == '' || steps.resume.outcome == 'success') }}
+        # Safety net only; the inner `timeout` does the precise boxing.
+        # Deliberately 300 (not iNWEB's 170): with a 170-minute step cap the
+        # 265-minute inner box could never be reached, wasting the 350-minute
+        # job budget. The inner timeout remains the binding limit.
+        timeout-minutes: 300
+        continue-on-error: true
+        env:
+          HOP_BUILD_MINUTES: ${{ inputs.build-minutes }}
+          NINJA_JOBS: ${{ inputs.ninja-jobs }}
+          CAB_BUILD_DRYRUN: ${{ inputs.probe-dryrun }}
+        run: |
+          # GitHub runs steps with `bash -eo pipefail`. With -e, a failed
+          # build kills this step before the lines below can record why,
+          # so build_status is never written and the hop reports success
+          # while nothing was built — exactly what happened in iNWEB hop 31.
+          # The exit code is captured deliberately, so -e is suspended
+          # for the duration of the build and nothing else.
+          set -o pipefail
+          set +e
+          timeout "${HOP_BUILD_MINUTES}m" bash scripts/build_android.sh 2>&1 | tee hop-logs/30-build.log
+          BUILD_EC=${PIPESTATUS[0]}
+          set -e
+          echo "build_exit=$BUILD_EC" | tee -a hop-logs/30-build.log
+          # 124 = the hop ran out of its time box: expected, package state and
+          # continue. ANY other non-zero exit is a real failure (gn gen error,
+          # compile error, missing artifact) and must not be reported as a
+          # successful hop: this step carries continue-on-error so the verdict
+          # step always runs, so the failure has to be re-raised there.
+          if [ "$BUILD_EC" -eq 124 ]; then
+            echo "build_status=timeout" >> "$GITHUB_OUTPUT"
+          elif [ "$BUILD_EC" -ne 0 ]; then
+            echo "build_status=failed" >> "$GITHUB_OUTPUT"
+          else
+            echo "build_status=ok" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ---- verdict: APK or resumable state ---------------------------------
+      - name: Post-build evidence, APK check, state packaging
+        id: verdict
+        # always(), with the checks moved inside: iNWEB hop 32 skipped this
+        # step entirely because the fetch had failed, and a hop that never
+        # built reported success. A hop must never end green without saying why.
+        if: ${{ always() }}
+        timeout-minutes: 60
+        run: |
+          set -o pipefail
+          # A hop that did not get a tree, or got the wrong one, is a failed
+          # hop — not a skipped verdict. Checked here rather than in the
+          # step's `if`, because a condition that skips the step also skips
+          # the explanation, which is how hop 32 reported success with
+          # build_exit=3 sitting in its own log.
+          if [ "${{ steps.fetch.outcome }}" != "success" ]; then
+            echo "BUILD: FAILED — the Chromium fetch did not succeed (see 10-fetch.log)."
+            echo "        No build was attempted; this hop is not a green hop."
+            echo "state=none" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          if [ "${{ steps.tag.outcome }}" != "success" ]; then
+            echo "BUILD: FAILED — the pinned tag check failed (see 15-tag.txt)."
+            echo "state=none" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          WS="$PWD/chromium"
+          OUT="$WS/src/out/development"
+          # A hop that failed for real is not a hop that succeeded slowly:
+          # say so, publish no resumable state, and fail the job.
+          if [ "${{ steps.build.outputs.build_status }}" = "failed" ]; then
+            {
+              echo "BUILD: FAILED — the build exited non-zero (see 30-build.log)."
+              echo "No resumable state is published: resuming from a stale out/"
+              echo "would hide the failure instead of fixing it."
+            } | tee hop-logs/45-verdict.txt
+            echo "done=false" >> "$GITHUB_OUTPUT"
+            echo "state=none" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          {
+            echo "--- build log tail ---"
+            tail -25 hop-logs/30-build.log 2>/dev/null || echo "(no build log)"
+            echo "--- out size / objects ---"
+            du -sh "$OUT" 2>/dev/null || echo "(no out)"
+            find "$OUT" -name '*.o' 2>/dev/null | wc -l
+            df -h /
+          } | tee hop-logs/40-postbuild.txt
+          if [ "${{ inputs.probe-dryrun }}" = "true" ]; then
+            echo "PROBE hop — dry-run counts are in 30-build.log; state not repackaged" | tee hop-logs/45-verdict.txt
+            echo "done=false" >> "$GITHUB_OUTPUT"
+            echo "state=none" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          APKS=$(find "$OUT/apks" -name '*.apk' -type f 2>/dev/null || true)
+          if [ -n "$APKS" ]; then
+            echo "APK: FOUND" | tee hop-logs/45-verdict.txt
+            echo "$APKS" | while read -r apk; do ls -lh "$apk"; sha256sum "$apk"; done | tee -a hop-logs/45-verdict.txt
+            echo "done=true" >> "$GITHUB_OUTPUT"
+            echo "state=none" >> "$GITHUB_OUTPUT"
+          elif [ -d "$OUT" ]; then
+            echo "APK: NONE (yet) — packaging resumable state" | tee hop-logs/45-verdict.txt
+            mkdir -p state-out
+            tar --zstd -cf state-out/state.tar.zst -C "$WS/src/out" development
+            split -b 4G -d state-out/state.tar.zst state-out/part-
+            rm state-out/state.tar.zst
+            (cd state-out && sha256sum part-* > manifest.sha256)
+            N=$(ls state-out/part-* 2>/dev/null | wc -l)
+            echo "state parts: $N (4 GiB each)" | tee -a hop-logs/45-verdict.txt
+            ls -lh state-out/ | tee -a hop-logs/45-verdict.txt
+            if [ "$N" -gt 8 ]; then
+              echo "STATE: BLOCKED — $N parts exceed the 8-part (32 GiB) upload capacity" | tee -a hop-logs/45-verdict.txt
+              echo "done=false" >> "$GITHUB_OUTPUT"
+              echo "state=none" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "STATE: PACKAGED" | tee -a hop-logs/45-verdict.txt
+            echo "done=false" >> "$GITHUB_OUTPUT"
+            echo "state=hop-state-${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+          else
+            echo "APK: NONE and no out/ to package — hop produced no resumable state" | tee hop-logs/45-verdict.txt
+            echo "done=false" >> "$GITHUB_OUTPUT"
+            echo "state=none" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload APK artifact (when produced)
+        if: ${{ always() && steps.verdict.outputs.done == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: hop-apk-${{ github.run_number }}
+          path: chromium/src/out/development/apks/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload state part 00
+        if: ${{ always() && steps.verdict.outputs.state != 'none' && steps.verdict.outputs.state != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.verdict.outputs.state }}-part-00
+          path: state-out/part-00
+          if-no-files-found: error
+          retention-days: 5
+
+      - name: Upload state part 01
+        if: ${{ always() && steps.verdict.outputs.state != 'none' && steps.verdict.outputs.state != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.verdict.outputs.state }}-part-01
+          path: state-out/part-01
+          if-no-files-found: ignore
+          retention-days: 5
+
+      - name: Upload state part 02
+        if: ${{ always() && steps.verdict.outputs.state != 'none' && steps.verdict.outputs.state != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.verdict.outputs.state }}-part-02
+          path: state-out/part-02
+          if-no-files-found: ignore
+          retention-days: 5
+
+      - name: Upload state part 03
+        if: ${{ always() && steps.verdict.outputs.state != 'none' && steps.verdict.outputs.state != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.verdict.outputs.state }}-part-03
+          path: state-out/part-03
+          if-no-files-found: ignore
+          retention-days: 5
+
+      - name: Upload state part 04
+        if: ${{ always() && steps.verdict.outputs.state != 'none' && steps.verdict.outputs.state != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.verdict.outputs.state }}-part-04
+          path: state-out/part-04
+          if-no-files-found: ignore
+          retention-days: 5
+
+      - name: Upload state part 05
+        if: ${{ always() && steps.verdict.outputs.state != 'none' && steps.verdict.outputs.state != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.verdict.outputs.state }}-part-05
+          path: state-out/part-05
+          if-no-files-found: ignore
+          retention-days: 5
+
+      - name: Upload state part 06
+        if: ${{ always() && steps.verdict.outputs.state != 'none' && steps.verdict.outputs.state != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.verdict.outputs.state }}-part-06
+          path: state-out/part-06
+          if-no-files-found: ignore
+          retention-days: 5
+
+      - name: Upload state part 07
+        if: ${{ always() && steps.verdict.outputs.state != 'none' && steps.verdict.outputs.state != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.verdict.outputs.state }}-part-07
+          path: state-out/part-07
+          if-no-files-found: ignore
+          retention-days: 5
+
+      - name: Upload state manifest
+        if: ${{ always() && steps.verdict.outputs.state != 'none' && steps.verdict.outputs.state != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.verdict.outputs.state }}-manifest
+          path: state-out/manifest.sha256
+          if-no-files-found: error
+          retention-days: 5
+
+      - name: Compose hop summary
+        if: ${{ always() }}
+        run: |
+          {
+            echo "# Build hop ${GITHUB_RUN_NUMBER}"
+            echo
+            echo "- commit: $(git rev-parse HEAD 2>/dev/null || echo unknown)"
+            echo "- chromium_tag: ${{ inputs.chromium_tag }}"
+            echo "- resume-from: ${{ inputs.resume-from || 'fresh' }}"
+            echo "- done: ${{ steps.verdict.outputs.done || 'unknown' }}"
+            echo "- state-prefix: ${{ steps.verdict.outputs.state || 'none' }}"
+            echo
+            echo "## Next hop"
+            echo
+            if [ "${{ steps.verdict.outputs.state }}" != "none" ] && [ -n "${{ steps.verdict.outputs.state }}" ]; then
+              echo "Dispatch the next hop with:"
+              echo "- resume-from: \`${{ steps.verdict.outputs.state }}\`"
+              echo "- resume-run-id: \`${GITHUB_RUN_ID}\`"
+            else
+              echo "No resumable state from this hop — check the verdict above."
+            fi
+            echo
+            grep -E "^(APK|STATE|RESUME|TAG): " hop-logs/*.txt hop-logs/*.log 2>/dev/null | head -10 || true
+            tail -5 hop-logs/40-postbuild.txt 2>/dev/null || true
+          } | tee hop-logs/99-summary.md
+          cat hop-logs/99-summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload hop logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: hop-${{ github.run_number }}-logs
+          path: hop-logs/
+          if-no-files-found: error
+          retention-days: 30

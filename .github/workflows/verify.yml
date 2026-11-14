@@ -1,0 +1,139 @@
+name: Verify (no compile)
+
+# =============================================================================
+# Cheap verification of repo-side changes (patch, Chromium pin, fetch/patch
+# tooling) WITHOUT compiling Chromium (~4.5 h per hop on a free runner).
+# Adapted from iNWEB-Browser's b001-verify.yml (separation of concerns).
+#
+#   fetch pinned tree (~10-15 min) -> tag verify -> patch apply/verify
+#
+# Total ~35-60 min, no out/ state, no APK, no compile. Its PASS says the
+# chain's inputs are sound; it says nothing about the compile itself — the
+# build-hop chain remains the only evidence source for that.
+#
+# The expensive chain (build-hop.yml) is dispatched ONLY deliberately, as
+# the continuation of the single resumable build — never by repo pushes.
+# =============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      chromium_tag:
+        description: "Chromium version tag (keep 159.0.8149.1 — android_stealth.patch targets it)"
+        required: true
+        type: string
+        default: "159.0.8149.1"
+  push:
+    branches: [main]
+    paths:
+      - "android_stealth.patch"
+      - "scripts/fetch_chromium.sh"
+      - "scripts/build_android.sh"
+      - "config/chromium/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify
+  cancel-in-progress: true   # cheap job — latest commit wins
+
+env:
+  CHROMIUM_TAG: ${{ inputs.chromium_tag || '159.0.8149.1' }}
+
+jobs:
+  verify:
+    name: "verify"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Record facts
+        run: |
+          mkdir -p verify-logs
+          {
+            echo "commit_sha=$(git rev-parse HEAD)"
+            echo "run_id=${GITHUB_RUN_ID} run_number=${GITHUB_RUN_NUMBER}"
+            echo "date_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "chromium_tag=${CHROMIUM_TAG}"
+            echo "event=${GITHUB_EVENT_NAME}"
+          } | tee verify-logs/00-facts.txt
+
+      - name: Free preinstalled toolchain space (documented)
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /usr/local/.ghcup /usr/local/share/boost /opt/hostedtoolcache/CodeQL \
+            /usr/lib/jvm /usr/local/share/chromium 2>/dev/null || true
+          sudo docker system prune -af >/dev/null 2>&1 || true
+          df -h / | tee verify-logs/05-disk.txt
+
+      - name: Fetch pinned Chromium (fetch_chromium.sh)
+        id: fetch
+        timeout-minutes: 75
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          bash scripts/fetch_chromium.sh 2>&1 | tee verify-logs/10-fetch.log
+
+      - name: Verify pinned tag (compact)
+        id: tag
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          WS="$PWD/chromium"
+          EXPECTED="${CHROMIUM_TAG}"
+          HEAD_SHA=$(git -C "$WS/src" rev-parse HEAD 2>/dev/null || echo none)
+          REMOTE_SHA=$(git -C "$WS/src" ls-remote origin "refs/tags/$EXPECTED^{}" "refs/tags/$EXPECTED" 2>/dev/null | grep -v '\^{}' | head -1 | cut -f1 || true)
+          VERSION=$(sed -n 's/^MAJOR=//p;s/^MINOR=//p;s/^BUILD=//p;s/^PATCH=//p' "$WS/src/chrome/VERSION" 2>/dev/null | paste -sd. || true)
+          echo "expected=$EXPECTED head=$HEAD_SHA remote_tag=$REMOTE_SHA chrome_version=$VERSION" | tee verify-logs/15-tag.txt
+          if [ "$HEAD_SHA" = "none" ] || [ -z "$REMOTE_SHA" ] || [ "$HEAD_SHA" != "$REMOTE_SHA" ] || [ "$VERSION" != "$EXPECTED" ]; then
+            echo "TAG: FAIL/BLOCKED (see above line)" | tee -a verify-logs/15-tag.txt
+            exit 1
+          fi
+          echo "TAG: PASS" | tee -a verify-logs/15-tag.txt
+
+      # ---- stage: patch apply + verify ------------------------------------
+      - name: Patch apply + verify
+        id: patches
+        if: ${{ always() && steps.fetch.outcome == 'success' && steps.tag.outcome == 'success' }}
+        timeout-minutes: 40
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          {
+            echo "--- git apply --check ---"
+            git -C chromium/src apply --check "$GITHUB_WORKSPACE/android_stealth.patch"
+            echo "--- git apply ---"
+            git -C chromium/src apply "$GITHUB_WORKSPACE/android_stealth.patch"
+            echo "--- git diff --check ---"
+            git -C chromium/src diff --check
+            echo "--- diff stat ---"
+            git -C chromium/src diff --stat
+            echo "PATCHES: PASS"
+          } 2>&1 | tee verify-logs/40-patches.txt
+
+      - name: Verdict
+        if: ${{ always() }}
+        run: |
+          {
+            echo "event=${GITHUB_EVENT_NAME} chromium_tag=${CHROMIUM_TAG}"
+            grep -h "TAG:\|PATCHES:" verify-logs/*.txt 2>/dev/null || echo "(no stage verdicts)"
+            echo "COMPILE: NONE (this job never compiles — compile evidence lives in the build-hop chain only)"
+          } | tee verify-logs/99-verdict.txt
+          cat verify-logs/99-verdict.txt >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ steps.fetch.outcome }}" != "success" ] || [ "${{ steps.tag.outcome }}" != "success" ] || [ "${{ steps.patches.outcome }}" != "success" ]; then
+            echo "VERIFY: FAILED (see stage verdicts above)"
+            exit 1
+          fi
+          echo "VERIFY: PASS"
+
+      - name: Upload verification logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-${{ github.run_number }}-logs
+          path: verify-logs/
+          if-no-files-found: error
+          retention-days: 30
