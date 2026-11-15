@@ -5,7 +5,8 @@ name: Verify (no compile)
 # tooling) WITHOUT compiling Chromium (~4.5 h per hop on a free runner).
 # Adapted from iNWEB-Browser's b001-verify.yml (separation of concerns).
 #
-#   fetch pinned tree (~10-15 min) -> tag verify -> patch apply/verify
+#   APK tooling self-test (gate + aligner, synthetic fixtures, no tree)
+#   -> fetch pinned tree (~10-15 min) -> tag verify -> patch apply/verify
 #   -> gn gen both args files (development + release, gen only, no compile)
 #
 # Total ~40-65 min, no out/ state, no APK, no compile. Its PASS says the
@@ -31,7 +32,12 @@ on:
       - "android_stealth.patch"
       - "scripts/fetch_chromium.sh"
       - "scripts/build_android.sh"
+      - "scripts/align_apk.py"
+      - "scripts/verify_apk.py"
+      - "scripts/finalize_apk.py"
       - "config/chromium/**"
+      - ".github/workflows/build-hop.yml"
+      - ".github/workflows/verify.yml"
 
 permissions:
   contents: read
@@ -62,6 +68,32 @@ jobs:
             echo "chromium_tag=${CHROMIUM_TAG}"
             echo "event=${GITHUB_EVENT_NAME}"
           } | tee verify-logs/00-facts.txt
+
+      # ---- stage: APK tooling self-test (no Chromium tree needed) -------
+      # The delivery gate (verify_apk.py) and the aligner (align_apk.py)
+      # are pure-stdlib Python; their --self-test modes exercise the
+      # alignment checker, the v2 fingerprint parser and the aligner on
+      # synthetic fixtures. This stage runs before the 15-minute fetch so
+      # a broken gate script fails fast. It also parses both workflow
+      # files as YAML — a syntax error in build-hop.yml would otherwise
+      # surface only when the next hop is dispatched.
+      - name: APK tooling self-test (align + gate)
+        id: apktools
+        timeout-minutes: 10
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          {
+            echo "--- verify_apk.py --self-test ---"
+            python3 scripts/verify_apk.py --self-test
+            echo "--- align_apk.py --self-test ---"
+            python3 scripts/align_apk.py --self-test
+            echo "--- finalize_apk.py --help (arg-parse smoke test) ---"
+            python3 scripts/finalize_apk.py --help >/dev/null
+            echo "--- workflow YAML parses ---"
+            ruby -ryaml -e 'YAML.load_file(".github/workflows/build-hop.yml"); YAML.load_file(".github/workflows/verify.yml"); puts "YAML: OK"'
+            echo "APKTOOLS: PASS"
+          } 2>&1 | tee verify-logs/30-apktools.txt
 
       - name: Free preinstalled toolchain space (documented)
         run: |
@@ -145,11 +177,11 @@ jobs:
         run: |
           {
             echo "event=${GITHUB_EVENT_NAME} chromium_tag=${CHROMIUM_TAG}"
-            grep -h "TAG:\|PATCHES:\|GNARGS:" verify-logs/*.txt 2>/dev/null || echo "(no stage verdicts)"
+            grep -h "TAG:\|PATCHES:\|GNARGS:\|APKTOOLS:" verify-logs/*.txt 2>/dev/null || echo "(no stage verdicts)"
             echo "COMPILE: NONE (this job never compiles — compile evidence lives in the build-hop chain only)"
           } | tee verify-logs/99-verdict.txt
           cat verify-logs/99-verdict.txt >> "$GITHUB_STEP_SUMMARY"
-          if [ "${{ steps.fetch.outcome }}" != "success" ] || [ "${{ steps.tag.outcome }}" != "success" ] || [ "${{ steps.patches.outcome }}" != "success" ] || [ "${{ steps.gnargs.outcome }}" != "success" ]; then
+          if [ "${{ steps.fetch.outcome }}" != "success" ] || [ "${{ steps.tag.outcome }}" != "success" ] || [ "${{ steps.patches.outcome }}" != "success" ] || [ "${{ steps.gnargs.outcome }}" != "success" ] || [ "${{ steps.apktools.outcome }}" != "success" ]; then
             echo "VERIFY: FAILED (see stage verdicts above)"
             exit 1
           fi
