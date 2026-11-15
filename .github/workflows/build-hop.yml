@@ -22,6 +22,14 @@ name: Build hop (resumable Chromium Android)
 #   resume-run-id = <this hop's run id>
 # State artifact names: <prefix>-part-00.. (-part-07), -manifest.
 # APK artifact names: hop-apk-<run#> (development), hop-apk-release-<run#>.
+# Delivery gate: before an APK is uploaded, scripts/verify_apk.py checks
+# it (stored entries 4-byte aligned, lib/*.so 16 KiB aligned, v2 signing
+# certificate matches the fingerprint pinned in
+# config/chromium/apk-signing.json). A failing APK fails the hop and is
+# NOT uploaded. The gate guards future builds against regressions — both
+# shipped APKs (debug + release) pass it: the build's own signflinger
+# alignment works (padding lives in the local headers' extra fields),
+# and both chains sign with the tree test key.
 # The chain stops by itself when: the APK is produced (done=true), a hop
 # fails or packages no state (state=none — a human must look first), or
 # hop-index reaches max-hops (default 20, safety cap against runaway).
@@ -370,6 +378,23 @@ jobs:
           if [ -n "$APKS" ]; then
             echo "APK: FOUND" | tee hop-logs/45-verdict.txt
             echo "$APKS" | while read -r apk; do ls -lh "$apk"; sha256sum "$apk"; done | tee -a hop-logs/45-verdict.txt
+            # Delivery gate, BEFORE the upload steps below: alignment +
+            # signing fingerprint. A build that regresses either must
+            # fail here, loudly, instead of shipping. No state is
+            # packaged on a gate failure — the chain stops and a human
+            # looks (scripts/finalize_apk.py is the manual fix path for
+            # an alignment failure; a fingerprint failure means the
+            # build signed with an unexpected key, which is never fixed
+            # by re-signing quietly).
+            for apk in $APKS; do
+              python3 scripts/verify_apk.py --apk "$apk" --config config/chromium/apk-signing.json 2>&1 | tee -a hop-logs/45-verdict.txt || {
+                echo "APK: GATE FAILED — $apk did not pass alignment/fingerprint (see above). Not uploaded." | tee -a hop-logs/45-verdict.txt
+                echo "done=false" >> "$GITHUB_OUTPUT"
+                echo "state=none" >> "$GITHUB_OUTPUT"
+                exit 1
+              }
+            done
+            echo "APK: GATE PASSED" | tee -a hop-logs/45-verdict.txt
             echo "done=true" >> "$GITHUB_OUTPUT"
             echo "state=none" >> "$GITHUB_OUTPUT"
           elif [ -d "$OUT" ]; then
