@@ -52,3 +52,25 @@ index 16bc3f8..647894c 100644
  
  import {I18nMixinLit} from 'chrome://resources/cr_elements/i18n_mixin_lit.js';
  import {loadTimeData} from 'chrome://resources/js/load_time_data.js';
+diff --git a/chrome/test/data/webui/extensions/BUILD.gn b/chrome/test/data/webui/extensions/BUILD.gn
+index 76386e2..2a6f7e9 100644
+--- a/chrome/test/data/webui/extensions/BUILD.gn
++++ b/chrome/test/data/webui/extensions/BUILD.gn
+@@ -67,10 +67,16 @@ build_webui_tests("build") {
+     "//chrome/browser/resources/extensions:build_ts",
+     "//third_party/lit/v3_0:build_ts",
+     "//ui/webui/resources/cr_components/color_change_listener:build_ts",
+-    "//ui/webui/resources/cr_components/cr_shortcut_input:build_ts",
+     "//ui/webui/resources/cr_elements:build_ts",
+     "//ui/webui/resources/js:build_ts",
+   ]
++
++  # Same desktop-only assert as the production target (see
++  # chrome/browser/resources/extensions/BUILD.gn).
++  if ((!is_android && !is_ios) || is_desktop_android) {
++    ts_deps +=
++        [ "//ui/webui/resources/cr_components/cr_shortcut_input:build_ts" ]
++  }
+   ts_definitions = [
+     "//tools/typescript/definitions/activity_log_private.d.ts",
+     "//tools/typescript/definitions/chrome_event.d.ts",
