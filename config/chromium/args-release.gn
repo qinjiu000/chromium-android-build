@@ -35,9 +35,51 @@ android_channel = "default"
 # AUTONINJA_BUILD_ID as belt-and-braces.
 android_static_analysis = "off"
 
+# =============================================================================
+# Selective de-Google, Phase 1 (ungoogled-chromium 158 patch set, adapted
+# for 159; see patches/ungoogled/ + the assessment report in the goal's
+# hidden_files/). Keep: Google Search, Safe Browsing (as-is, no API key),
+# Chrome Web Store, local autofill, spellcheck. Remove: Sync/sign-in,
+# field trials, metrics/crash reporting, other Google service domains.
+# =============================================================================
+
+# No Google API keys (same as before — the build never had any; now explicit).
+google_api_key = ""
+google_default_client_id = ""
+google_default_client_secret = ""
+use_official_google_api_keys = false
+
+# Field trials off (complements the disable-fetching-field-trials patch).
+disable_fieldtrial_testing_config = true
+
+# Google services off.
+enable_hangout_services_extension = false
+enable_mdns = false
+enable_reporting = false
+enable_service_discovery = false
+
+# On-device AI model service off (replaces the pruned-binaries patch hunk
+# we dropped — we do not prune binaries, so the build fix is not needed).
+use_on_device_model_service = false
+
+# Warnings must not fail the patched build (patches can leave unused
+# variables/imports behind).
+treat_warnings_as_errors = false
+
+# Android extension support via the desktop-mode path
+# (enable_desktop_android_extensions, declared in
+# extensions/buildflags/buildflags.gni). Stock Android Chrome disables
+# extensions; Kiwi/Yandex proved this path works. Phone-side extension
+# management UI still needs custom work; Web Store install flow needs
+# verification on device.
+enable_desktop_android_extensions = true
+
 # Deliberately NOT set:
 # - is_official_build: would enable ThinLTO/PGO — never publicly verified
 #   on free runners; leave unset.
+# - safe_browsing_mode: keep the default (Safe Browsing stays ON). ungoogled
+#   sets safe_browsing_mode=0; the user keeps Safe Browsing as-is.
+# - enable_remoting: already false on Android (remoting/remoting_enable.gni).
 # - enable_nacl: removed from the Chromium tree (no such arg in 159);
 #   passing it would fail gn gen.
 # - blink_symbol_level / v8_symbol_level: left at their defaults, which

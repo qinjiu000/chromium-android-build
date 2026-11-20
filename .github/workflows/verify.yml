@@ -111,6 +111,16 @@ jobs:
             git -C chromium/src apply "$GITHUB_WORKSPACE/android_stealth.patch"
             echo "--- git diff --check ---"
             git -C chromium/src diff --check
+            echo "--- de-Google patch set (series order) ---"
+            while IFS= read -r patch; do
+              [ -n "$patch" ] || continue
+              git -C chromium/src apply --check "$GITHUB_WORKSPACE/patches/ungoogled/$patch"
+              git -C chromium/src apply "$GITHUB_WORKSPACE/patches/ungoogled/$patch"
+            done < "$GITHUB_WORKSPACE/patches/ungoogled/series"
+            echo "--- git diff --check (after de-Google patches) ---"
+            git -C chromium/src diff --check
+            echo "--- domain substitution dry-run ---"
+            python3 "$GITHUB_WORKSPACE/scripts/domain_substitution.py" "$PWD/chromium/src" --dry-run
             echo "--- diff stat ---"
             git -C chromium/src diff --stat
             echo "PATCHES: PASS"

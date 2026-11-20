@@ -1,0 +1,29 @@
+diff --git a/chrome/android/java/src/org/chromium/chrome/browser/settings/MainSettings.java b/chrome/android/java/src/org/chromium/chrome/browser/settings/MainSettings.java
+index 9f7e202..94bd741 100644
+--- a/chrome/android/java/src/org/chromium/chrome/browser/settings/MainSettings.java
++++ b/chrome/android/java/src/org/chromium/chrome/browser/settings/MainSettings.java
+@@ -691,6 +691,11 @@ public class MainSettings extends ChromeBaseSettingsFragment
+             removePreferenceIfPresent(PREF_SIGN_IN);
+         }
+ 
++        // De-Google: Sync and Google sign-in are disabled, so hide the Google
++        // Services entry and its now-empty section.
++        removePreferenceIfPresent(PREF_GOOGLE_SERVICES);
++        removePreferenceIfPresent(PREF_ACCOUNT_AND_GOOGLE_SERVICES_SECTION);
++
+         updateSearchEnginePreference();
+         updateAutofillPreferences();
+         updateAddressBarPreference();
+@@ -732,9 +737,9 @@ public class MainSettings extends ChromeBaseSettingsFragment
+     }
+ 
+     private static boolean shouldShowSignInPref(Profile profile) {
+-        SigninManager signinManager = IdentityServicesProvider.get().getSigninManager(profile);
+-        assumeNonNull(signinManager);
+-        return signinManager.isSigninSupported(/* requireUpdatedPlayServices= */ false);
++        // De-Google: Google sign-in is disabled in this build, so the sign-in
++        // row is never shown.
++        return false;
+     }
+ 
+     private static boolean shouldShowDefaultBrowserSetting() {

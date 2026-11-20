@@ -66,6 +66,33 @@ git diff --check ||
 echo "Patch applied:"
 git diff --stat | tail -3
 
+# Apply the selective de-Google patch set (ungoogled-chromium 158 patches,
+# adapted for 159; see patches/ungoogled/series). Applied AFTER the stealth
+# patch — the set was verified against the stealth-patched tree. Each patch
+# is checked before applying; a failure aborts the hop.
+UNGOOGLED_DIR="$ROOT/patches/ungoogled"
+if [ ! -f "$UNGOOGLED_DIR/series" ]; then
+  echo "ERROR: missing de-Google patch series: $UNGOOGLED_DIR/series" >&2
+  exit 2
+fi
+while IFS= read -r patch; do
+  [ -n "$patch" ] || continue
+  git apply --check "$UNGOOGLED_DIR/$patch" ||
+    { echo "FATAL: de-Google patch $patch does not apply cleanly to this tree" >&2; exit 3; }
+  git apply "$UNGOOGLED_DIR/$patch" ||
+    { echo "FATAL: failed to apply de-Google patch $patch" >&2; exit 3; }
+done < "$UNGOOGLED_DIR/series"
+git diff --check ||
+  { echo "FATAL: de-Google patches left whitespace errors" >&2; exit 3; }
+echo "De-Google patches applied: $(grep -c . "$UNGOOGLED_DIR/series") patches"
+
+# Domain substitution — AFTER all patches (patch context lines may contain
+# Google domains that substitution would rewrite, breaking the patch).
+# Rewrites hardcoded Google service domains to dead domains, except the
+# kept services (Google Search, Web Store, Safe Browsing endpoints).
+python3 "$ROOT/scripts/domain_substitution.py" "$WORKSPACE/src" ||
+  { echo "FATAL: domain substitution failed" >&2; exit 3; }
+
 OUT_DIR="out/${CAB_BUILD_TYPE}"
 
 # mtime discipline, part 2 — the part that actually works (iNWEB hops 29/30).

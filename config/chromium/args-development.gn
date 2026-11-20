@@ -33,6 +33,25 @@ android_channel = "default"
 # AUTONINJA_BUILD_ID as belt-and-braces.
 android_static_analysis = "off"
 
+# =============================================================================
+# Selective de-Google, Phase 1 — same block as args-release.gn (see there
+# for the full rationale). The debug build carries the same de-Google
+# configuration so the patches and flags can be iterated on the faster
+# debug chain before the release chain runs.
+# =============================================================================
+google_api_key = ""
+google_default_client_id = ""
+google_default_client_secret = ""
+use_official_google_api_keys = false
+disable_fieldtrial_testing_config = true
+enable_hangout_services_extension = false
+enable_mdns = false
+enable_reporting = false
+enable_service_discovery = false
+use_on_device_model_service = false
+treat_warnings_as_errors = false
+enable_desktop_android_extensions = true
+
 # Deliberately NOT set:
 # - enable_nacl: removed from the Chromium tree (no such arg in 159);
 #   passing it would fail gn gen.
@@ -40,3 +59,5 @@ android_static_analysis = "off"
 #   follow symbol_level=1 (iNWEB-faithful).
 # - is_java_debug: defaults to is_debug (true here).
 # - use_thin_lto: defaults off for non-official builds; leave alone.
+# - safe_browsing_mode: keep the default (Safe Browsing stays ON).
+# - enable_remoting: already false on Android.

@@ -1,0 +1,77 @@
+diff --git a/chrome/browser/safe_browsing/incident_reporting/incident_report_uploader_impl.cc b/chrome/browser/safe_browsing/incident_reporting/incident_report_uploader_impl.cc
+index 8103e4c..620a802 100644
+--- a/chrome/browser/safe_browsing/incident_reporting/incident_report_uploader_impl.cc
++++ b/chrome/browser/safe_browsing/incident_reporting/incident_report_uploader_impl.cc
+@@ -29,7 +29,7 @@ namespace safe_browsing {
+ namespace {
+ 
+ const char kSbIncidentReportUrl[] =
+-    "https://sb-ssl.google.com/safebrowsing/clientreport/incident";
++    "trk:268:https://sb-ssl.google.com/safebrowsing/clientreport/incident";
+ 
+ constexpr net::NetworkTrafficAnnotationTag
+     kSafeBrowsingIncidentTrafficAnnotation =
+diff --git a/chrome/browser/safe_browsing/incident_reporting/incident_reporting_service.cc b/chrome/browser/safe_browsing/incident_reporting/incident_reporting_service.cc
+index 4bcdd59..c1810e0 100644
+--- a/chrome/browser/safe_browsing/incident_reporting/incident_reporting_service.cc
++++ b/chrome/browser/safe_browsing/incident_reporting/incident_reporting_service.cc
+@@ -302,11 +302,14 @@ IncidentReportingService::UploadContext::~UploadContext() = default;
+ 
+ // static
+ bool IncidentReportingService::IsEnabledForProfile(Profile* profile) {
++  return false;
++#if 0
+   if (profile->IsOffTheRecord())
+     return false;
+   if (!IsSafeBrowsingEnabled(*profile->GetPrefs()))
+     return false;
+   return IsExtendedReportingEnabled(*profile->GetPrefs());
++#endif
+ }
+ 
+ IncidentReportingService::IncidentReportingService(
+diff --git a/chrome/browser/safe_browsing/interstitials/chrome_safe_browsing_blocking_page_factory.cc b/chrome/browser/safe_browsing/interstitials/chrome_safe_browsing_blocking_page_factory.cc
+index 2d7691a..7d3c38e 100644
+--- a/chrome/browser/safe_browsing/interstitials/chrome_safe_browsing_blocking_page_factory.cc
++++ b/chrome/browser/safe_browsing/interstitials/chrome_safe_browsing_blocking_page_factory.cc
+@@ -63,8 +63,7 @@ ChromeSafeBrowsingBlockingPageFactory::CreateSafeBrowsingPage(
+       Profile::FromBrowserContext(web_contents->GetBrowserContext());
+   // Create appropriate display options for this blocking page.
+   PrefService* prefs = profile->GetPrefs();
+-  bool is_extended_reporting_opt_in_allowed =
+-      IsExtendedReportingOptInAllowed(*prefs);
++  bool is_extended_reporting_opt_in_allowed = false;
+   bool is_proceed_anyway_disabled = IsSafeBrowsingProceedAnywayDisabled(*prefs);
+ 
+   // Determine if any prefs need to be updated prior to showing the security
+diff --git a/chrome/browser/safe_browsing/safe_browsing_service.cc b/chrome/browser/safe_browsing/safe_browsing_service.cc
+index 3b50f84..399499c 100644
+--- a/chrome/browser/safe_browsing/safe_browsing_service.cc
++++ b/chrome/browser/safe_browsing/safe_browsing_service.cc
+@@ -422,7 +422,7 @@ SafeBrowsingUIManager* SafeBrowsingServiceImpl::CreateUIManager() {
+ }
+ 
+ void SafeBrowsingServiceImpl::RegisterAllDelayedAnalysis() {
+-#if BUILDFLAG(FULL_SAFE_BROWSING)
++#if 0
+   RegisterBinaryIntegrityAnalysis();
+ #endif
+ }
+diff --git a/components/security_interstitials/core/safe_browsing_loud_error_ui.cc b/components/security_interstitials/core/safe_browsing_loud_error_ui.cc
+index a154c82..fcd3d69 100644
+--- a/components/security_interstitials/core/safe_browsing_loud_error_ui.cc
++++ b/components/security_interstitials/core/safe_browsing_loud_error_ui.cc
+@@ -27,11 +27,11 @@ namespace {
+ // For malware interstitial pages, we link the problematic URL to Google's
+ // diagnostic page.
+ const char kSbDiagnosticUrl[] =
+-    "https://transparencyreport.google.com/safe-browsing/search?url=%s";
++    "trk:227:https://transparencyreport.google.com/safe-browsing/search?url=%s";
+ 
+ // Constants for the V4 phishing string upgrades.
+ const char kReportPhishingErrorUrl[] =
+-    "https://safebrowsing.google.com/safebrowsing/report_error/?url=%s";
++    "trk:228:https://safebrowsing.google.com/safebrowsing/report_error/?url=%s";
+ 
+ void RecordExtendedReportingPrefChanged(bool report) {
+   UMA_HISTOGRAM_BOOLEAN("SafeBrowsing.Pref.Extended.SecurityInterstitial",

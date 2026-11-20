@@ -1,0 +1,34 @@
+# Custom domain substitution regexes for the selective de-Google build.
+# Based on ungoogled-chromium's domain_regex.list (158), with exclusions for
+# the three Google services the user keeps:
+#   - Google Search (www.google.com)
+#   - Chrome Web Store (chrome.google.com)
+#   - Safe Browsing endpoints (safebrowsing.googleapis.com)
+# Format: <python regex>#<replacement> — same as upstream, consumed by
+# utils/domain_substitution.py (or our own copy in scripts/).
+#
+# DROPPED vs upstream (no benefit for a selective build, avoids breaking
+# Google sites the user still visits): youtube, ytimg, gmail, ggpht rules.
+# The google.com rule below adds negative lookbehinds for www./safebrowsing./
+# chrome. so the kept services' source-embedded URLs survive substitution.
+# Note: substitution only rewrites domains hardcoded in Chromium's source
+# (service endpoints, default URLs). It does NOT affect URLs the user types
+# or clicks — visiting youtube.com/gmail.com in the browser is unaffected.
+fonts(\\*?)\.googleapis(\\*?)\.com#f0ntz\g<1>.9oo91e8p1\g<2>.qjz9zk
+(?<!safebrowsing\.)google([A-Za-z\-]+?\\*?)\.com(?!mon)#9oo91e\g<1>.qjz9zk
+(?<!www\.)(?<!chrome\.)google\.com(?!mon)#9oo91e.qjz9zk
+gstatic([A-Za-z\-]*?\\*?)\.com#95tat1c\g<1>.qjz9zk
+chrome([A-Za-z\-]*?\\*?)\.com(?!ponent)#ch40me\g<1>.qjz9zk
+chromium([A-Za-z\-]*?\\*?)\.org#ch40m1um\g<1>.qjz9zk
+mozilla([A-Za-z\-]*?\\*?)\.org#m0z111a\g<1>.qjz9zk
+facebook([A-Za-z\-]*?\\*?)\.com#f8c3b00k\g<1>.qjz9zk
+appspot([A-Za-z\-]*?\\*?)\.com#8pp2p8t\g<1>.qjz9zk
+doubleclick([A-Za-z\-]*?\\*?)\.net#60u613cl1c4\g<1>.n3t.qjz9zk
+doubleclick([A-Za-z\-]*?\\*?)\.com#60u613cl1c4\g<1>.c0m.qjz9zk
+googlezip(\\*?)\.net#9oo91e21p\g<1>.qjz9zk
+beacons([1-9]?\\*?)\.gvt([1-9]?\\*?)\.com#b3ac0n2\g<1>.9vt\g<2>.qjz9zk
+microsoft(\\*?)\.com#m1cr050ft\g<1>.qjz9zk
+1e100(\\*?)\.net#l3lOO\g<1>.qjz9zk
+(?<!http://schemas.)android(\\*?)\.com#8n6r01d\g<1>.qjz9zk
+goo\.gl(e?)#goo.gl\g<1>.qjz9zk
+privacysandbox([A-Za-z\-]*?\\*?)\.com#pr1v4cy54ndb0x\g<1>.qjz9zk
