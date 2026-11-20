@@ -4,6 +4,7 @@
 0021-disable-rlz.patch
 adapted-159-block-requests.patch
 adapted-159-extensions-ntp-dep-guard.patch
+adapted-159-extensions-shortcut-input-guard.patch
 adapted-159-media-router-discovery-guard.patch
 adapted-159-safe_browsing-disable-incident-reporting.patch
 adapted-159-ui-remove-signin-sync-settings.patch

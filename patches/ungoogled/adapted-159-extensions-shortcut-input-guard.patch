@@ -1,0 +1,36 @@
+diff --git a/chrome/browser/resources/extensions/BUILD.gn b/chrome/browser/resources/extensions/BUILD.gn
+index 2a7fa64..da110bc 100644
+--- a/chrome/browser/resources/extensions/BUILD.gn
++++ b/chrome/browser/resources/extensions/BUILD.gn
+@@ -147,12 +147,16 @@ build_webui("build") {
+   ts_deps = [
+     "//third_party/lit/v3_0:build_ts",
+     "//ui/webui/resources/cr_components/color_change_listener:build_ts",
+-    "//ui/webui/resources/cr_components/cr_shortcut_input:build_ts",
+     "//ui/webui/resources/cr_components/managed_footnote:build_ts",
+     "//ui/webui/resources/cr_elements:build_ts",
+     "//ui/webui/resources/js:build_ts",
+   ]
+ 
++  if ((!is_android && !is_ios) || is_desktop_android) {
++    ts_deps +=
++        [ "//ui/webui/resources/cr_components/cr_shortcut_input:build_ts" ]
++  }
++
+   webui_context_type = "trusted"
+   optimize = optimize_webui
+   if (optimize) {
+diff --git a/chrome/browser/resources/extensions/keyboard_shortcuts.ts b/chrome/browser/resources/extensions/keyboard_shortcuts.ts
+index 16bc3f8..647894c 100644
+--- a/chrome/browser/resources/extensions/keyboard_shortcuts.ts
++++ b/chrome/browser/resources/extensions/keyboard_shortcuts.ts
+@@ -2,7 +2,9 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
++// <if expr="not is_android and not is_ios or is_desktop_android">
+ import 'chrome://resources/cr_components/cr_shortcut_input/cr_shortcut_input.js';
++// </if>
+ 
+ import {I18nMixinLit} from 'chrome://resources/cr_elements/i18n_mixin_lit.js';
+ import {loadTimeData} from 'chrome://resources/js/load_time_data.js';
