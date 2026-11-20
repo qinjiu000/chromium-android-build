@@ -1,0 +1,25 @@
+diff --git a/chrome/browser/extensions/BUILD.gn b/chrome/browser/extensions/BUILD.gn
+index 0854938..eec5754 100644
+--- a/chrome/browser/extensions/BUILD.gn
++++ b/chrome/browser/extensions/BUILD.gn
+@@ -2582,7 +2582,6 @@ source_set("browser_tests") {
+     "//chrome/browser/ui/extensions",
+     "//chrome/browser/ui/extensions:test_support",
+     "//chrome/browser/ui/navigator",
+-    "//chrome/browser/ui/search:test_support_ui",
+     "//chrome/browser/ui/tabs/alert:tab_alert",
+     "//chrome/browser/ui/toolbar",
+     "//chrome/browser/ui/webui:theme_source",
+@@ -2608,6 +2607,12 @@ source_set("browser_tests") {
+   if (enable_webui_ntp) {
+     deps += [ "//chrome/browser/new_tab_page" ]
+   }
++  # test_support_ui is only defined under enable_webui_ntp
++  # (chrome/browser/ui/search/BUILD.gn), which is false on phone Android.
++  # Same guard as new_tab_page above.
++  if (enable_webui_ntp) {
++    deps += [ "//chrome/browser/ui/search:test_support_ui" ]
++  }
+   deps += [
+     "//components/autofill/content/browser",
+     "//components/back_forward_cache",
