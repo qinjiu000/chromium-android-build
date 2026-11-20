@@ -1,0 +1,24 @@
+diff --git a/chrome/browser/extensions/BUILD.gn b/chrome/browser/extensions/BUILD.gn
+index d60d097..0854938 100644
+--- a/chrome/browser/extensions/BUILD.gn
++++ b/chrome/browser/extensions/BUILD.gn
+@@ -2550,7 +2550,6 @@ source_set("browser_tests") {
+     "//chrome/browser/infobars",
+     "//chrome/browser/lifetime:termination_notification",
+     "//chrome/browser/net",
+-    "//chrome/browser/new_tab_page",
+     "//chrome/browser/permissions",
+     "//chrome/browser/picture_in_picture",
+     "//chrome/browser/policy:test_support",
+@@ -2604,6 +2603,11 @@ source_set("browser_tests") {
+       "//chrome/test/base:android_ui_test_utils",
+     ]
+   }
++  # new_tab_page asserts enable_webui_ntp, which is false on phone Android.
++  # Only depend on it where the WebUI NTP exists (desktop / desktop Android).
++  if (enable_webui_ntp) {
++    deps += [ "//chrome/browser/new_tab_page" ]
++  }
+   deps += [
+     "//components/autofill/content/browser",
+     "//components/back_forward_cache",
