@@ -90,9 +90,27 @@ ABI：arm64-v8a（生产）＋ x86_64（仅模拟器 CI 验证）。**
 | `run_tests.py` | Python 侧测试脚本（文件导入场景） |
 | `build.sh` | NDK r30 交叉编译脚本（arm64-v8a + x86_64，API 29） |
 | `fetch_python.sh` | 拉 Chaquopy 包并校验 SHA1 |
+| `run_on_emulator.sh` | 把产物推到模拟器并运行（workflow 以单行调用它，见下） |
 | `../../.github/workflows/python-prototype.yml` | CI 验证 workflow（手动触发，两路：x86_64 快路＋arm64 实证） |
 
-## 5. 结论（待 CI 跑完填写）
+## 5. CI 验证记录
+
+- **第 1 轮（run 44831624898，2026-11-21，失败，两路各有不同异常）**：
+  - 两路的 NDK 下载、Chaquopy 拉取＋校验、交叉编译步骤全部通过——
+    `fetch_python.sh` 与 `build.sh` 在 CI 上已证实可用。
+  - x86_64：模拟器 32 秒启动成功（KVM 生效），但 `script:` 被 action
+    逐行以独立 `sh -c` 执行，shell 变量跨行不保留，`$remote` 为空导致
+    `mkdir /lib-dynload` 失败。修复：逻辑移到 `run_on_emulator.sh`，
+    workflow 只单行调用它。
+  - arm64：API 34 模拟器 30 分钟内始终未向 adb 注册（`device
+    'emulator-5554' not found`），最终启动超时。原因未定性（ARM 模拟
+    本来就极慢，也可能根本起不来），不轻易说根因。修复方向：改 API 30
+    （action 文档称 arm64 镜像在低 API 级别更可靠）、4 核、4GB 内存、
+    启动超时放宽到 2400 秒。另已排除 ARM runner 路线：NDK r30 的 Linux
+    包只含 `linux-x86_64` 宿主工具链，无 `linux-aarch64`。
+- **第 2 轮**：待跑。
+
+## 6. 结论（待 CI 跑完填写）
 
 - 本地交叉编译：待 NDK 下载完成后验证。
 - x86_64 模拟器运行：待 CI。
