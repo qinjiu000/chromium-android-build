@@ -1,25 +1,43 @@
 diff --git a/chrome/browser/resources/extensions/BUILD.gn b/chrome/browser/resources/extensions/BUILD.gn
-index 2a7fa64..da110bc 100644
+index 2a7fa64..ac65265 100644
 --- a/chrome/browser/resources/extensions/BUILD.gn
 +++ b/chrome/browser/resources/extensions/BUILD.gn
-@@ -147,12 +147,16 @@ build_webui("build") {
+@@ -147,12 +147,19 @@ build_webui("build") {
    ts_deps = [
      "//third_party/lit/v3_0:build_ts",
      "//ui/webui/resources/cr_components/color_change_listener:build_ts",
 -    "//ui/webui/resources/cr_components/cr_shortcut_input:build_ts",
-     "//ui/webui/resources/cr_components/managed_footnote:build_ts",
+-    "//ui/webui/resources/cr_components/managed_footnote:build_ts",
      "//ui/webui/resources/cr_elements:build_ts",
      "//ui/webui/resources/js:build_ts",
    ]
  
++  # cr_shortcut_input and managed_footnote both assert
++  # (!is_android && !is_ios) || is_desktop_android: desktop-only components.
 +  if ((!is_android && !is_ios) || is_desktop_android) {
-+    ts_deps +=
-+        [ "//ui/webui/resources/cr_components/cr_shortcut_input:build_ts" ]
++    ts_deps += [
++      "//ui/webui/resources/cr_components/cr_shortcut_input:build_ts",
++      "//ui/webui/resources/cr_components/managed_footnote:build_ts",
++    ]
 +  }
 +
    webui_context_type = "trusted"
    optimize = optimize_webui
    if (optimize) {
+diff --git a/chrome/browser/resources/extensions/item_list.ts b/chrome/browser/resources/extensions/item_list.ts
+index c0a7ca6..35e6cdf 100644
+--- a/chrome/browser/resources/extensions/item_list.ts
++++ b/chrome/browser/resources/extensions/item_list.ts
+@@ -2,7 +2,9 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
++// <if expr="not is_android and not is_ios or is_desktop_android">
+ import 'chrome://resources/cr_components/managed_footnote/managed_footnote.js';
++// </if>
+ import 'chrome://resources/cr_elements/cr_toggle/cr_toggle.js';
+ import './item.js';
+ import './mv2_deprecation_panel.js';
 diff --git a/chrome/browser/resources/extensions/keyboard_shortcuts.ts b/chrome/browser/resources/extensions/keyboard_shortcuts.ts
 index 16bc3f8..647894c 100644
 --- a/chrome/browser/resources/extensions/keyboard_shortcuts.ts
