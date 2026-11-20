@@ -1,7 +1,16 @@
 name: CPython Android prototype
 
+# NOTE: workflow_dispatch only works once this file exists on the default
+# branch (GitHub API restriction). Until then, the push trigger below runs
+# the prototype on this scratch branch; keep it scoped to this branch and
+# to the prototype paths so no other push ever triggers it.
 on:
   workflow_dispatch:
+  push:
+    branches: [scratch/cpython-prototype]
+    paths:
+      - prototypes/cpython/**
+      - .github/workflows/python-prototype.yml
 
 jobs:
   proto-x86_64:
