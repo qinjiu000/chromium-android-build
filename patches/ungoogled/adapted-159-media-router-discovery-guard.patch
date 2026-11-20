@@ -1,0 +1,15 @@
+diff --git a/chrome/browser/media/router/BUILD.gn b/chrome/browser/media/router/BUILD.gn
+index 2ee20bb..8e5e9d8 100644
+--- a/chrome/browser/media/router/BUILD.gn
++++ b/chrome/browser/media/router/BUILD.gn
+@@ -430,7 +430,9 @@ source_set("unittests") {
+   }
+ 
+   # Traditional desktop platforms and desktop android with extensions support.
+-  if (!is_android || enable_desktop_android_extensions) {
++  # discovery itself asserts !is_android || is_desktop_android, so the
++  # extensions flag alone must not pull it in on phone Android.
++  if (!is_android || is_desktop_android) {
+     deps += [ "//chrome/browser/media/router/discovery:test_support" ]
+   }
+ 
