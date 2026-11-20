@@ -29,6 +29,7 @@ on:
     branches: [main]
     paths:
       - "android_stealth.patch"
+      - "patches/fingerprint/**"
       - "scripts/fetch_chromium.sh"
       - "scripts/build_android.sh"
       - "config/chromium/**"
@@ -110,6 +111,14 @@ jobs:
             echo "--- git apply ---"
             git -C chromium/src apply "$GITHUB_WORKSPACE/android_stealth.patch"
             echo "--- git diff --check ---"
+            git -C chromium/src diff --check
+            echo "--- fingerprint patch set (series order) ---"
+            while IFS= read -r patch; do
+              [ -n "$patch" ] || continue
+              git -C chromium/src apply --check "$GITHUB_WORKSPACE/patches/fingerprint/$patch"
+              git -C chromium/src apply "$GITHUB_WORKSPACE/patches/fingerprint/$patch"
+            done < "$GITHUB_WORKSPACE/patches/fingerprint/series"
+            echo "--- git diff --check (after fingerprint patches) ---"
             git -C chromium/src diff --check
             echo "--- de-Google patch set (series order) ---"
             while IFS= read -r patch; do

@@ -1,0 +1,447 @@
+diff --git a/chrome/android/chrome_java_sources.gni b/chrome/android/chrome_java_sources.gni
+index d93b36d..e8e76e1 100644
+--- a/chrome/android/chrome_java_sources.gni
++++ b/chrome/android/chrome_java_sources.gni
+@@ -676,6 +676,8 @@ chrome_java_sources = [
+   "java/src/org/chromium/chrome/browser/dragdrop/ChromeTabbedOnDragListener.java",
+   "java/src/org/chromium/chrome/browser/dragdrop/DragAndDropLauncherActivity.java",
+   "java/src/org/chromium/chrome/browser/enterprise/PlatformAuthEntraTokensReader.java",
++  "java/src/org/chromium/chrome/browser/environments/EnvironmentManager.java",
++  "java/src/org/chromium/chrome/browser/environments/EnvironmentPickerActivity.java",
+   "java/src/org/chromium/chrome/browser/externalnav/ExternalNavigationDelegateImpl.java",
+   "java/src/org/chromium/chrome/browser/externalnav/IntentWithRequestMetadataHandler.java",
+   "java/src/org/chromium/chrome/browser/feedback/ChromeFeedbackCollector.java",
+diff --git a/chrome/android/java/AndroidManifest.xml b/chrome/android/java/AndroidManifest.xml
+index 6b86cc1..8978658 100644
+--- a/chrome/android/java/AndroidManifest.xml
++++ b/chrome/android/java/AndroidManifest.xml
+@@ -626,6 +626,10 @@ by a child template that "extends" this file.
+             {{ self.extra_web_rendering_activity_definitions() }}
+         </activity>
+         <!-- ChromeTabbedActivity related -->
++        <activity android:name="org.chromium.chrome.browser.environments.EnvironmentPickerActivity"
++            android:exported="true"
++            android:theme="@style/LauncherTheme"
++            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|mcc|mnc|screenLayout|smallestScreenSize|uiMode|density" />
+         <activity android:name="org.chromium.chrome.browser.ChromeTabbedActivity"
+             android:theme="@style/Theme.Chromium.TabbedMode"
+             android:exported="true"
+@@ -668,7 +672,7 @@ by a child template that "extends" this file.
+                 android:value="true" />
+         </activity>
+         <activity-alias android:name="com.google.android.apps.chrome.Main"
+-            android:targetActivity="org.chromium.chrome.browser.ChromeTabbedActivity"
++            android:targetActivity="org.chromium.chrome.browser.environments.EnvironmentPickerActivity"
+             android:exported="true">
+             <property android:name="android.window.PROPERTY_SUPPORTS_MULTI_INSTANCE_SYSTEM_UI"
+                 android:value="true" />
+diff --git a/chrome/android/java/src/org/chromium/chrome/browser/environments/EnvironmentManager.java b/chrome/android/java/src/org/chromium/chrome/browser/environments/EnvironmentManager.java
+new file mode 100644
+index 0000000..dbfa434
+--- /dev/null
++++ b/chrome/android/java/src/org/chromium/chrome/browser/environments/EnvironmentManager.java
+@@ -0,0 +1,231 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++package org.chromium.chrome.browser.environments;
++
++import android.content.Context;
++import android.content.SharedPreferences;
++import android.os.StrictMode;
++
++import org.json.JSONArray;
++import org.json.JSONException;
++import org.json.JSONObject;
++
++import org.chromium.base.CommandLine;
++import org.chromium.base.PathUtils;
++import org.chromium.build.annotations.NullMarked;
++import org.chromium.build.annotations.Nullable;
++
++import java.io.File;
++import java.security.SecureRandom;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.UUID;
++
++/** Manages persisted browser environments and their startup configuration. */
++@NullMarked
++public class EnvironmentManager {
++    private static final String PREFERENCES_NAME = "fingerprint_environments";
++    private static final String ENVIRONMENTS_KEY = "environments";
++    private static final String CURRENT_ENVIRONMENT_ID_KEY = "current_env_id";
++    private static final String MANIFEST_VERSION_KEY = "manifest_version";
++    private static final long MAX_SEED = 0xFFFFFFFFL;
++
++    /** Represents one persisted browser environment. */
++    public static class Environment {
++        public final String id;
++        public final String name;
++        public final long seed;
++
++        /** Creates an environment value. */
++        public Environment(String id, String name, long seed) {
++            this.id = id;
++            this.name = name;
++            this.seed = seed;
++        }
++    }
++
++    /** Returns all valid environments, or an empty list if stored data is unreadable. */
++    public static List<Environment> getEnvironments(Context context) {
++        List<Environment> environments = new ArrayList<>();
++        try {
++            @Nullable String serialized =
++                    getPreferences(context).getString(ENVIRONMENTS_KEY, "[]");
++            if (serialized == null) return environments;
++            JSONArray array = new JSONArray(serialized);
++            for (int i = 0; i < array.length(); ++i) {
++                JSONObject entry = array.getJSONObject(i);
++                String id = entry.getString("id");
++                String name = entry.getString("name");
++                long seed = entry.getLong("seed");
++                if (!isValidId(id) || seed < 0 || seed > MAX_SEED) continue;
++                environments.add(new Environment(id, name, seed));
++            }
++        } catch (Exception e) {
++            return new ArrayList<>();
++        }
++        return environments;
++    }
++
++    /** Returns the current environment, or null if its ID is not in the stored list. */
++    public static @Nullable Environment getCurrentEnvironment(Context context) {
++        @Nullable String currentId =
++                getPreferences(context).getString(CURRENT_ENVIRONMENT_ID_KEY, null);
++        if (currentId == null) return null;
++        for (Environment environment : getEnvironments(context)) {
++            if (environment.id.equals(currentId)) return environment;
++        }
++        return null;
++    }
++
++    /** Marks the environment with the given ID as current. */
++    public static void setCurrentEnvironment(Context context, String id) {
++        getPreferences(context)
++                .edit()
++                .putString(CURRENT_ENVIRONMENT_ID_KEY, id)
++                .putInt(MANIFEST_VERSION_KEY, 1)
++                .apply();
++    }
++
++    /** Creates, persists, and returns a new environment. */
++    public static Environment createEnvironment(Context context, String name) {
++        Environment environment =
++                new Environment(
++                        UUID.randomUUID().toString(),
++                        name,
++                        new SecureRandom().nextLong() & MAX_SEED);
++        List<Environment> environments = getEnvironments(context);
++        environments.add(environment);
++        saveEnvironments(context, environments);
++        return environment;
++    }
++
++    /** Deletes an environment's directories before removing its stored metadata. */
++    public static boolean deleteEnvironment(Context context, String id) {
++        Environment environment = findEnvironment(context, id);
++        if (environment == null) return false;
++        if (!deleteRecursively(getUserDataDir(context, environment))
++                || !deleteRecursively(getCacheDir(context, environment))) {
++            return false;
++        }
++
++        List<Environment> environments = getEnvironments(context);
++        List<Environment> remainingEnvironments = new ArrayList<>();
++        for (Environment candidate : environments) {
++            if (!candidate.id.equals(id)) remainingEnvironments.add(candidate);
++        }
++        SharedPreferences.Editor editor =
++                getPreferences(context)
++                        .edit()
++                        .putString(ENVIRONMENTS_KEY, toJson(remainingEnvironments));
++        if (id.equals(getPreferences(context).getString(CURRENT_ENVIRONMENT_ID_KEY, null))) {
++            editor.remove(CURRENT_ENVIRONMENT_ID_KEY);
++        }
++        editor.putInt(MANIFEST_VERSION_KEY, 1).apply();
++        return true;
++    }
++
++    /** Returns the environment's user data directory. */
++    public static File getUserDataDir(Context context, Environment environment) {
++        return new File(PathUtils.getDataDirectory(), "envs/" + environment.id);
++    }
++
++    /** Returns the environment's cache directory. */
++    public static File getCacheDir(Context context, Environment environment) {
++        return new File(context.getCacheDir(), "envs/" + environment.id);
++    }
++
++    /** Creates and selects the default environment if no environments are stored. */
++    public static Environment ensureDefaultEnvironment(Context context) {
++        List<Environment> environments = getEnvironments(context);
++        if (environments.isEmpty()) {
++            Environment environment = createEnvironment(context, "默认环境");
++            setCurrentEnvironment(context, environment.id);
++            return environment;
++        }
++
++        Environment current = getCurrentEnvironment(context);
++        if (current != null) return current;
++        setCurrentEnvironment(context, environments.get(0).id);
++        return environments.get(0);
++    }
++
++    /** Adds the current environment's user-data, cache, and seed command-line switches. */
++    public static void applyEnvironmentSwitches(Context context) {
++        StrictMode.ThreadPolicy oldPolicy = StrictMode.allowThreadDiskReads();
++        try {
++            Environment environment = getCurrentEnvironment(context);
++            if (environment == null) environment = ensureDefaultEnvironment(context);
++            CommandLine commandLine = CommandLine.getInstance();
++            commandLine.appendSwitchWithValue(
++                    "user-data-dir", getUserDataDir(context, environment).getAbsolutePath());
++            commandLine.appendSwitchWithValue(
++                    "disk-cache-dir", getCacheDir(context, environment).getAbsolutePath());
++            commandLine.appendSwitchWithValue("stealth-seed", Long.toString(environment.seed));
++        } finally {
++            StrictMode.setThreadPolicy(oldPolicy);
++        }
++    }
++
++    /** Returns the application's dedicated environment preferences. */
++    private static SharedPreferences getPreferences(Context context) {
++        return context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE);
++    }
++
++    /** Finds a stored environment by ID. */
++    private static @Nullable Environment findEnvironment(Context context, String id) {
++        for (Environment environment : getEnvironments(context)) {
++            if (environment.id.equals(id)) return environment;
++        }
++        return null;
++    }
++
++    /** Saves the environment list and manifest version. */
++    private static void saveEnvironments(Context context, List<Environment> environments) {
++        getPreferences(context)
++                .edit()
++                .putString(ENVIRONMENTS_KEY, toJson(environments))
++                .putInt(MANIFEST_VERSION_KEY, 1)
++                .apply();
++    }
++
++    /** Serializes environment values into the persisted JSON array. */
++    private static String toJson(List<Environment> environments) {
++        JSONArray array = new JSONArray();
++        for (Environment environment : environments) {
++            JSONObject entry = new JSONObject();
++            try {
++                entry.put("id", environment.id);
++                entry.put("name", environment.name);
++                entry.put("seed", environment.seed);
++            } catch (JSONException e) {
++                throw new IllegalStateException(e);
++            }
++            array.put(entry);
++        }
++        return array.toString();
++    }
++
++    /** Checks that an ID is a canonical UUID before using it in a filesystem path. */
++    private static boolean isValidId(String id) {
++        try {
++            return UUID.fromString(id).toString().equals(id);
++        } catch (IllegalArgumentException e) {
++            return false;
++        }
++    }
++
++    /** Removes a file or directory tree, returning false if any deletion fails. */
++    private static boolean deleteRecursively(File file) {
++        if (!file.exists()) return true;
++        if (file.isDirectory()) {
++            File[] children = file.listFiles();
++            if (children == null) return false;
++            for (File child : children) {
++                if (!deleteRecursively(child)) return false;
++            }
++        }
++        return file.delete();
++    }
++}
+diff --git a/chrome/android/java/src/org/chromium/chrome/browser/environments/EnvironmentPickerActivity.java b/chrome/android/java/src/org/chromium/chrome/browser/environments/EnvironmentPickerActivity.java
+new file mode 100644
+index 0000000..2c2b91f
+--- /dev/null
++++ b/chrome/android/java/src/org/chromium/chrome/browser/environments/EnvironmentPickerActivity.java
+@@ -0,0 +1,139 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++package org.chromium.chrome.browser.environments;
++
++import android.app.Activity;
++import android.app.AlertDialog;
++import android.content.Intent;
++import android.os.Bundle;
++import android.os.StrictMode;
++import android.view.View;
++import android.widget.AdapterView;
++import android.widget.ArrayAdapter;
++import android.widget.Button;
++import android.widget.EditText;
++import android.widget.LinearLayout;
++import android.widget.ListView;
++import android.widget.Toast;
++
++import org.chromium.build.annotations.NullMarked;
++import org.chromium.build.annotations.Nullable;
++
++import java.util.ArrayList;
++import java.util.List;
++
++/** Shows the available environments before starting the browser. */
++@NullMarked
++public class EnvironmentPickerActivity extends Activity {
++    private final List<EnvironmentManager.Environment> mEnvironments = new ArrayList<>();
++    private @Nullable ArrayAdapter<String> mAdapter;
++
++    /** Ensures an initial environment exists before displaying the picker. */
++    @Override
++    protected void onCreate(@Nullable Bundle savedInstanceState) {
++        super.onCreate(savedInstanceState);
++        // First access loads the environment preferences file from disk.
++        StrictMode.ThreadPolicy oldPolicy = StrictMode.allowThreadDiskReads();
++        try {
++            EnvironmentManager.ensureDefaultEnvironment(this);
++        } finally {
++            StrictMode.setThreadPolicy(oldPolicy);
++        }
++
++        LinearLayout layout = new LinearLayout(this);
++        layout.setOrientation(LinearLayout.VERTICAL);
++
++        Button createButton = new Button(this);
++        // TODO: Move UI strings into Android resources.
++        createButton.setText("新建环境");
++        createButton.setOnClickListener(view -> showCreateDialog());
++        layout.addView(createButton);
++
++        ListView listView = new ListView(this);
++        ArrayAdapter<String> adapter =
++                new ArrayAdapter<>(this, android.R.layout.simple_list_item_1, new ArrayList<>());
++        mAdapter = adapter;
++        listView.setAdapter(adapter);
++        listView.setOnItemClickListener(this::onEnvironmentClicked);
++        listView.setOnItemLongClickListener(this::onEnvironmentLongClicked);
++        layout.addView(listView);
++
++        setContentView(layout);
++        refreshEnvironments();
++    }
++
++    /** Opens the chosen environment in ChromeTabbedActivity. */
++    private void onEnvironmentClicked(
++            AdapterView<?> parent, View view, int position, long itemId) {
++        EnvironmentManager.Environment environment = mEnvironments.get(position);
++        EnvironmentManager.setCurrentEnvironment(this, environment.id);
++        Intent intent = new Intent();
++        intent.setClassName(this, "org.chromium.chrome.browser.ChromeTabbedActivity");
++        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
++        startActivity(intent);
++        finish();
++    }
++
++    /** Prompts for confirmation before deleting the selected environment. */
++    private boolean onEnvironmentLongClicked(
++            AdapterView<?> parent, View view, int position, long itemId) {
++        EnvironmentManager.Environment environment = mEnvironments.get(position);
++        // TODO: Move UI strings into Android resources.
++        new AlertDialog.Builder(this)
++                .setTitle("删除环境")
++                .setMessage("确定删除“" + environment.name + "”吗？")
++                .setNegativeButton("取消", null)
++                .setPositiveButton(
++                        "删除",
++                        (dialog, which) -> {
++                            if (!EnvironmentManager.deleteEnvironment(
++                                    this, environment.id)) {
++                                Toast.makeText(this, "删除环境失败", Toast.LENGTH_SHORT).show();
++                            }
++                            refreshEnvironments();
++                        })
++                .show();
++        return true;
++    }
++
++    /** Prompts for a name and creates an environment. */
++    private void showCreateDialog() {
++        EditText nameInput = new EditText(this);
++        // TODO: Move UI strings into Android resources.
++        nameInput.setHint("环境名称");
++        new AlertDialog.Builder(this)
++                .setTitle("新建环境")
++                .setView(nameInput)
++                .setNegativeButton("取消", null)
++                .setPositiveButton(
++                        "创建",
++                        (dialog, which) -> {
++                            String name = nameInput.getText().toString().trim();
++                            if (!name.isEmpty()) {
++                                EnvironmentManager.createEnvironment(this, name);
++                                refreshEnvironments();
++                            }
++                        })
++                .show();
++    }
++
++    /** Reloads the environment list shown by the adapter. */
++    private void refreshEnvironments() {
++        ArrayAdapter<String> adapter = mAdapter;
++        if (adapter == null) return;
++        StrictMode.ThreadPolicy oldPolicy = StrictMode.allowThreadDiskReads();
++        try {
++            mEnvironments.clear();
++            mEnvironments.addAll(EnvironmentManager.getEnvironments(this));
++        } finally {
++            StrictMode.setThreadPolicy(oldPolicy);
++        }
++        adapter.clear();
++        for (EnvironmentManager.Environment environment : mEnvironments) {
++            adapter.add(environment.name);
++        }
++        adapter.notifyDataSetChanged();
++    }
++}
+diff --git a/chrome/android/java/src/org/chromium/chrome/browser/init/ChromeBrowserInitializer.java b/chrome/android/java/src/org/chromium/chrome/browser/init/ChromeBrowserInitializer.java
+index b772e33..506401d 100644
+--- a/chrome/android/java/src/org/chromium/chrome/browser/init/ChromeBrowserInitializer.java
++++ b/chrome/android/java/src/org/chromium/chrome/browser/init/ChromeBrowserInitializer.java
+@@ -7,6 +7,7 @@ package org.chromium.chrome.browser.init;
+ import android.os.StrictMode;
+ 
+ import org.chromium.base.CommandLine;
++import org.chromium.base.ContextUtils;
+ import org.chromium.base.ResettersForTesting;
+ import org.chromium.base.SysUtils;
+ import org.chromium.base.ThreadUtils;
+@@ -17,6 +18,7 @@ import org.chromium.base.task.ChainedTasks;
+ import org.chromium.base.task.TaskTraits;
+ import org.chromium.build.annotations.NullMarked;
+ import org.chromium.build.annotations.Nullable;
++import org.chromium.chrome.browser.environments.EnvironmentManager;
+ import org.chromium.chrome.browser.flags.ChromeSwitches;
+ import org.chromium.components.background_task_scheduler.BackgroundTaskSchedulerFactory;
+ import org.chromium.content_public.browser.BrowserStartupController;
+@@ -144,6 +146,7 @@ public class ChromeBrowserInitializer {
+         if (SysUtils.isLowEndDevice()) {
+             CommandLine.getInstance().appendSwitch(ChromeSwitches.DISABLE_DOMAIN_RELIABILITY);
+         }
++        EnvironmentManager.applyEnvironmentSwitches(ContextUtils.getApplicationContext());
+     }
+ 
+     /**

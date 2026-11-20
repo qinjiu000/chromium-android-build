@@ -66,6 +66,27 @@ git diff --check ||
 echo "Patch applied:"
 git diff --stat | tail -3
 
+# Apply the fingerprint-browser patch set (phase 2; see patches/fingerprint/series).
+# Applied AFTER the stealth patch — it builds on the --stealth-seed mechanism
+# (per-environment seed injection from the Java launcher). Applied BEFORE the
+# de-Google set; the two sets touch disjoint files, so order between them is
+# not load-bearing, but keep it stable for reproducibility.
+FINGERPRINT_DIR="$ROOT/patches/fingerprint"
+if [ ! -f "$FINGERPRINT_DIR/series" ]; then
+  echo "ERROR: missing fingerprint patch series: $FINGERPRINT_DIR/series" >&2
+  exit 2
+fi
+while IFS= read -r patch; do
+  [ -n "$patch" ] || continue
+  git apply --check "$FINGERPRINT_DIR/$patch" ||
+    { echo "FATAL: fingerprint patch $patch does not apply cleanly to this tree" >&2; exit 3; }
+  git apply "$FINGERPRINT_DIR/$patch" ||
+    { echo "FATAL: failed to apply fingerprint patch $patch" >&2; exit 3; }
+done < "$FINGERPRINT_DIR/series"
+git diff --check ||
+  { echo "FATAL: fingerprint patches left whitespace errors" >&2; exit 3; }
+echo "Fingerprint patches applied: $(grep -c . "$FINGERPRINT_DIR/series") patches"
+
 # Apply the selective de-Google patch set (ungoogled-chromium 158 patches,
 # adapted for 159; see patches/ungoogled/series). Applied AFTER the stealth
 # patch — the set was verified against the stealth-patched tree. Each patch
