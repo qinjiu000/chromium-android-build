@@ -1,0 +1,245 @@
+diff --git a/chrome/android/chrome_java_sources.gni b/chrome/android/chrome_java_sources.gni
+index 9ab16ba..0bd77a8 100644
+--- a/chrome/android/chrome_java_sources.gni
++++ b/chrome/android/chrome_java_sources.gni
+@@ -492,6 +492,7 @@ chrome_java_sources = [
+   "java/src/org/chromium/chrome/browser/contextualsearch/TapFarFromPreviousSuppression.java",
+   "java/src/org/chromium/chrome/browser/contextualsearch/TapSuppressionHeuristics.java",
+   "java/src/org/chromium/chrome/browser/cpython/PythonBridge.java",
++  "java/src/org/chromium/chrome/browser/cpython/PythonConsoleActivity.java",
+   "java/src/org/chromium/chrome/browser/crash/ChromeMinidumpUploadJobServiceImpl.java",
+   "java/src/org/chromium/chrome/browser/crash/ChromeMinidumpUploaderDelegate.java",
+   "java/src/org/chromium/chrome/browser/crash/ChromePureJavaExceptionReporter.java",
+diff --git a/chrome/android/java/AndroidManifest.xml b/chrome/android/java/AndroidManifest.xml
+index 6b86cc1..8e9a442 100644
+--- a/chrome/android/java/AndroidManifest.xml
++++ b/chrome/android/java/AndroidManifest.xml
+@@ -687,6 +687,16 @@ by a child template that "extends" this file.
+             {{ self.supports_vr() }}
+             {{ self.extra_web_rendering_activity_definitions() }}
+         </activity-alias>
++        <activity android:name="org.chromium.chrome.browser.cpython.PythonConsoleActivity"
++            android:exported="true"
++            android:label="Python Console"
++            android:theme="@style/LauncherTheme"
++            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|mcc|mnc|screenLayout|smallestScreenSize|uiMode|density">
++            <intent-filter>
++                <action android:name="android.intent.action.MAIN" />
++                <category android:name="android.intent.category.LAUNCHER" />
++            </intent-filter>
++        </activity>
+         <activity android:name="org.chromium.chrome.browser.ChromeTabbedActivity2"
+             android:theme="@style/Theme.Chromium.TabbedMode"
+             android:exported="false"
+diff --git a/chrome/android/java/src/org/chromium/chrome/browser/cpython/PythonConsoleActivity.java b/chrome/android/java/src/org/chromium/chrome/browser/cpython/PythonConsoleActivity.java
+new file mode 100644
+index 0000000..b3111a7
+--- /dev/null
++++ b/chrome/android/java/src/org/chromium/chrome/browser/cpython/PythonConsoleActivity.java
+@@ -0,0 +1,206 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++package org.chromium.chrome.browser.cpython;
++
++import android.app.Activity;
++import android.graphics.Typeface;
++import android.os.Bundle;
++import android.os.Handler;
++import android.os.Looper;
++import android.view.Gravity;
++import android.view.View;
++import android.widget.Button;
++import android.widget.EditText;
++import android.widget.LinearLayout;
++import android.widget.ScrollView;
++import android.widget.TextView;
++import android.widget.Toast;
++
++import org.chromium.build.annotations.NullMarked;
++import org.chromium.build.annotations.Nullable;
++
++import java.util.concurrent.ExecutorService;
++import java.util.concurrent.Executors;
++import java.util.concurrent.atomic.AtomicBoolean;
++
++/**
++ * Standalone Python console: a plain Activity with an input box and an output
++ * area, running arbitrary Python code (REPL-style) in the browser process.
++ *
++ * <p>Honest v1 limits, all accepted for a personal tool (see design doc §3.2):
++ * <ul>
++ *   <li>Same process as the browser: a native crash inside Python kills the
++ *       browser too. A separate-process console is a later hardening step.
++ *   <li>The 30-second watchdog is advisory only: a hung eval keeps running on
++ *       the worker thread (CPython cannot be interrupted from Java) and later
++ *       runs queue behind it. Kill the app if a run never returns.
++ *   <li>No memory limit is enforced in v1.
++ * </ul>
++ *
++ * <p>All Python work runs on a single worker thread (the interpreter is
++ * initialized once and shared with the automation bridge); results are posted
++ * back to the UI thread.
++ */
++@NullMarked
++public class PythonConsoleActivity extends Activity {
++    /** Advisory run timeout; the worker thread cannot be interrupted. */
++    private static final int EVAL_TIMEOUT_SECONDS = 30;
++    /** Trim the output view once it grows past this many characters. */
++    private static final int MAX_OUTPUT_CHARS = 200_000;
++
++    private final ExecutorService mExecutor = Executors.newSingleThreadExecutor();
++    private final Handler mMainHandler = new Handler(Looper.getMainLooper());
++
++    private @Nullable EditText mInput;
++    private @Nullable TextView mOutput;
++    private @Nullable ScrollView mOutputScroll;
++    private @Nullable Button mRunButton;
++
++    private int mRunCounter;
++    private volatile boolean mRunning;
++
++    @Override
++    protected void onCreate(@Nullable Bundle savedInstanceState) {
++        super.onCreate(savedInstanceState);
++
++        LinearLayout layout = new LinearLayout(this);
++        layout.setOrientation(LinearLayout.VERTICAL);
++        int padding = (int) (16 * getResources().getDisplayMetrics().density);
++        layout.setPadding(padding, padding, padding, padding);
++
++        EditText input = new EditText(this);
++        input.setHint("Python 代码");
++        input.setTypeface(Typeface.MONOSPACE);
++        input.setMinLines(4);
++        input.setGravity(Gravity.TOP);
++        mInput = input;
++        layout.addView(
++                input,
++                new LinearLayout.LayoutParams(
++                        LinearLayout.LayoutParams.MATCH_PARENT,
++                        LinearLayout.LayoutParams.WRAP_CONTENT));
++
++        LinearLayout buttonRow = new LinearLayout(this);
++        buttonRow.setOrientation(LinearLayout.HORIZONTAL);
++
++        Button runButton = new Button(this);
++        // TODO: Move UI strings into Android resources.
++        runButton.setText("运行");
++        runButton.setOnClickListener(view -> onRunClicked());
++        mRunButton = runButton;
++        buttonRow.addView(runButton);
++
++        Button clearButton = new Button(this);
++        clearButton.setText("清空输出");
++        clearButton.setOnClickListener(view -> clearOutput());
++        buttonRow.addView(clearButton);
++
++        layout.addView(buttonRow);
++
++        TextView output = new TextView(this);
++        output.setTypeface(Typeface.MONOSPACE);
++        output.setTextIsSelectable(true);
++        mOutput = output;
++
++        ScrollView outputScroll = new ScrollView(this);
++        outputScroll.addView(output);
++        mOutputScroll = outputScroll;
++        layout.addView(
++                outputScroll,
++                new LinearLayout.LayoutParams(
++                        LinearLayout.LayoutParams.MATCH_PARENT,
++                        LinearLayout.LayoutParams.MATCH_PARENT, 1f));
++
++        setContentView(layout);
++
++        // Initialize the interpreter on the worker thread so the first run is
++        // fast. initialize() is idempotent; the bridge shares it.
++        appendOutput("正在初始化 Python…\n");
++        mExecutor.execute(
++                () -> {
++                    try {
++                        PythonBridge.initialize(getApplicationContext());
++                        appendOutput("Python 3.13.16 就绪\n");
++                    } catch (IllegalStateException e) {
++                        appendOutput("Python 初始化失败：" + e.getMessage() + "\n");
++                    }
++                });
++    }
++
++    @Override
++    protected void onDestroy() {
++        super.onDestroy();
++        // Drops queued runs; a running eval is NOT interrupted (see class
++        // Javadoc) and keeps the worker thread until it returns.
++        mExecutor.shutdownNow();
++    }
++
++    /** Runs the input code on the worker thread, then shows the result. */
++    private void onRunClicked() {
++        if (mRunning) {
++            Toast.makeText(this, "正在运行，请稍候", Toast.LENGTH_SHORT).show();
++            return;
++        }
++        EditText input = mInput;
++        if (input == null) return;
++        String code = input.getText().toString();
++        if (code.trim().isEmpty()) return;
++
++        mRunCounter++;
++        int runNumber = mRunCounter;
++        mRunning = true;
++        Button runButton = mRunButton;
++        if (runButton != null) runButton.setEnabled(false);
++        appendOutput(">>> #" + runNumber + "\n" + code + "\n");
++
++        AtomicBoolean finished = new AtomicBoolean(false);
++        mMainHandler.postDelayed(
++                () -> {
++                    if (!finished.get()) {
++                        appendOutput(
++                                "（#" + runNumber + " 执行超过 "
++                                        + EVAL_TIMEOUT_SECONDS
++                                        + " 秒，仍在后台运行；如需停止请退出应用）\n");
++                    }
++                },
++                EVAL_TIMEOUT_SECONDS * 1000L);
++
++        mExecutor.execute(
++                () -> {
++                    String result = PythonBridge.eval(code);
++                    finished.set(true);
++                    runOnUiThread(
++                            () -> {
++                                appendOutput(result + "\n");
++                                mRunning = false;
++                                Button button = mRunButton;
++                                if (button != null) button.setEnabled(true);
++                            });
++                });
++    }
++
++    /** Appends text to the output area, trimming the head if it grows too big. */
++    private void appendOutput(String text) {
++        runOnUiThread(
++                () -> {
++                    TextView output = mOutput;
++                    if (output == null) return;
++                    output.append(text);
++                    if (output.length() > MAX_OUTPUT_CHARS) {
++                        output.getEditableText()
++                                .delete(0, output.length() - MAX_OUTPUT_CHARS / 2);
++                    }
++                    ScrollView scroll = mOutputScroll;
++                    if (scroll != null) {
++                        scroll.post(() -> scroll.fullScroll(View.FOCUS_DOWN));
++                    }
++                });
++    }
++
++    private void clearOutput() {
++        TextView output = mOutput;
++        if (output != null) output.setText("");
++    }
++}
