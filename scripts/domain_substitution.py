@@ -64,6 +64,10 @@ def main():
         rel = rel.strip()
         if not rel:
             continue
+        # Structured-metrics codegen validates owner emails; rewriting their
+        # domains breaks the build.
+        if rel.startswith("tools/metrics/structured/"):
+            continue
         p = tree / rel
         if not p.is_file():
             missing += 1
