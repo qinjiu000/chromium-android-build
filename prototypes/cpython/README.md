@@ -108,7 +108,6 @@ ABI：arm64-v8a（生产）＋ x86_64（仅模拟器 CI 验证）。**
     （action 文档称 arm64 镜像在低 API 级别更可靠）、4 核、4GB 内存、
     启动超时放宽到 2400 秒。另已排除 ARM runner 路线：NDK r30 的 Linux
     包只含 `linux-x86_64` 宿主工具链，无 `linux-aarch64`。
-- **第 2 轮**：待跑。
 - **第 2 轮（run 44836441687，2026-11-21，失败）**：
   - x86_64：单行脚本修复生效，模拟器上实际跑起来了，7 项检查通过 6 项
     （imports-and-version、zlib、sqlite3、threading、ssl、socket 全 PASS，
@@ -122,11 +121,33 @@ ABI：arm64-v8a（生产）＋ x86_64（仅模拟器 CI 验证）。**
     模拟器 SDK 包只有 x86_64 宿主二进制（repository2-1.xml 核实），
     NDK r30 也无 linux-aarch64 工具链。第 3 轮起 arm64 只做 CI 交叉编译
     验证，字面意义上的 arm64 运行证明留待真机（用户手机）。
-- **第 3 轮**：待跑。
+- **第 3 轮（run 44841964231，2026-11-21，成功）**：
+  - x86_64：7 项检查全 PASS，`PROTOTYPE OK`（日志已亲自核对）。
+    自编译 C 扩展 `pyhello` 在 Android 上加载并执行通过。
+  - arm64-build：三包 SHA1 校验通过，产物 `file` 输出确认
+    “ARM aarch64, for Android 29, built by NDK r30 (16248370)”。
 
-## 6. 结论（待 CI 跑完填写）
+## 6. 结论（2026-11-21，原型跑通）
 
-- 本地交叉编译：待 NDK 下载完成后验证。
-- x86_64 模拟器运行：待 CI。
-- arm64 模拟器运行：待 CI（字面意义上的 arm64 实证；x86_64  runner 上跑 ARM
-  模拟器慢，job 超时按仓库惯例放宽）。
+1. **版本已冻结**：CPython 3.13.16，Chaquopy `target:3.13.16-0`，
+   arm64-v8a（生产）＋ x86_64（仅 CI 验证）。理由见 §1。
+2. **扩展模块加载机制已在 Android 上实证**：x86_64 模拟器（API 34）
+   上 7/7 通过——标准库、zlib、sqlite3、线程、ssl、socket，
+   以及用 NDK r30 自编译的 C 扩展 `pyhello` 的加载与执行；
+   `sys.path` 与设计一致（stdlib 目录＋lib-dynload＋工作目录）。
+   四类场景覆盖情况：标准库 ✓、原生扩展 ✓、文件导入 ✓
+   （测试脚本本身即文件导入）；纯 Python 第三方包未单独测，
+   但与文件导入同一机制（`sys.path` 上的 `.py`），风险极低，
+   GN 集成后补一个即可。
+3. **arm64 交叉编译双路验证通过**：本地与 CI 均用 NDK r30 + API 29
+   编出产物，readelf/`file` 核实架构、NEEDED、min API 29、
+   16KB 对齐、`PyInit_pyhello` 导出全部正确。
+4. **arm64 字面运行证明未完成——基础设施限制，不是原型问题**：
+   ARM64 模拟器在 x86_64 runner 上两轮都起不来（API 34/30），
+   ARM runner 也无模拟器与 NDK 宿主二进制。留待真机：
+   在用户手机上 `adb push` 同一套 arm64 产物到 `/data/local/tmp`，
+   用 `run_on_emulator.sh` 的同款命令即可复现（手机须开 adb 调试，
+   且由用户操作）。
+5. **下一步**：原型已跑通，可以写 GN 集成了（按设计文档 §3：
+   GN 包装目标 → JNI 桥接 → 独立控制台 → 自动化桥接）。
+   真机 arm64 实证与 GN 集成可并行，不互相阻塞。
