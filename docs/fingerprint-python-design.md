@@ -244,6 +244,28 @@ scripts/build_android.sh            # 如需应用新补丁集，在此按顺序
   （当前主窗口 / 指定 tab ID / 指定 window），再从现有 tab model 与
   `WebContents` 接口实现最小动作集；多窗口、Custom Tab、多 Activity 下的
   行为要写进边界说明并补并发切换/窗口销毁测试。
+  - **v1 选择语义（2026-11-21 已对 159 树核实）**：窗口只取前台
+    `ChromeTabbedActivity`（`ApplicationStatus.getLastTrackedFocusedActivity()`，
+    非该 Activity 或无前台 Activity 即报错）；只操作普通模型
+    （`selector.getModel(false)`，v1 不碰无痕）；tab 按 `Tab.getId()` 选，
+    `current` 是普通模型自身的当前 tab（`model.getTabAt(model.index())`，
+    `index()` 为 -1 时即无当前 tab；不用 `selector.getCurrentTab()`，
+    它跟随当前选中的模型，可能是无痕）。API：`list_tabs()`（JSON 数组，
+    含 id/url/title/current）、`current_tab()`、`open_tab(url)`（经
+    `ChromeTabbedActivity.getTabCreator(false).createNewTab(LoadUrlParams,
+    TabLaunchType.FROM_CHROME_UI, null)`，返回新 tab id 或 -1）、
+    `close_tab(tab_id)`（`TabClosureParams.closeTab(tab).build()` ＋
+    `model.getTabRemover().closeTabs(params, false)`）、`navigate(tab_id, url)`
+    （`Tab.loadUrl(new LoadUrlParams(url))`）、`eval_js(tab_id, script)`
+    （`WebContents.evaluateJavaScript(script, JavaScriptCallback)`，
+    回调 `handleJavaScriptResult(String jsonResult)`，等 30 秒）。
+    Java 侧所有 tab 操作都在 UI 线程跑（main Handler＋CountDownLatch 阻塞等，
+    C++ 只同步调 Java 静态方法）；`browser` 模块用 `PyImport_AppendInittab`
+    在 `Py_InitializeFromConfig` 之前注册，模块方法经 JNI 回调 Java
+    （JavaVM＋BrowserBridge 类全局引用＋method ID 在 `nativeInitialize` 里
+    缓存，`FindClass` 在该 native 方法内用定义类的 loader 解析，可靠）。
+    铁律：UI 线程的 Java 工作绝不反调 Python（否则 GIL 死锁）。
+    多窗口/Custom Tab/窗口销毁的并发行为 v1 不承诺，只返回错误。
 - **独立控制台**：浏览器内一个 Activity/Fragment，带输入框与输出区，
   跑任意 Python 代码（REPL 式），与页面无关；stdout/stderr 重定向到界面。
   **权限与崩溃边界**：v1 控制台是高权限嵌入式控制台，与浏览器同进程——
@@ -318,3 +340,4 @@ scripts/fetch_python.sh     # 如走 CI 下载，拉预编译产物的脚本
 - [x] CPython 打包机制：预编译 `.so` 走 `android_apk` 的 `loadable_modules`（路径列表，不必是编译产物，`internal_rules.gni:2844` 直接作 `--native-libs` 输入）；`chrome_public_apk` 透传 `loadable_modules`/`asset_deps`/`deps`（`chrome_public_apk_tmpl.gni:339-340,396-397,477-479`）；stdlib zip 走 `android_assets`＋`renaming_destinations` 定资产路径；只包 4 个真库＋57 个扩展模块，`libpython3.so` 与 3 个 `*_chaquopy.so` 是无人 NEEDED 的垫片（2026-11-21，readelf 逐个核对 65 个 `.so`）
 - [x] CPython JNI 桥（阶段 B）：`generate_jni` 在特性自有 BUILD.gn、`group("jni_headers")` 登记、`source_set` 挂到 `chrome_android_core` deps（自动进 libchrome）；Java 侧 `@JNINamespace("cpython")`＋`XxxJni.get()`；`DEFINE_JNI(Class)` 必须在 `.cc` 文件作用域调用，否则 `Java_org_jni_1zero_GEN_1JNI_...` 边界符号不存在（`gn gen` 查不出，运行时 UnsatisfiedLinkError）；`base::android::JavaParamRef` 在 159 里不存在，用 `JavaRef`；JNI 函数须 `static` 且返回 `bool`；`PyObject_CallMethodNoArgs` 的名字参数是 `PyObject*`，const char* 名字用 `PyObject_CallMethod(obj, name, nullptr)`（2026-11-21：亲自跑 `jni_zero.py from-source` 生成头文件核对；`.cc` 用 g++ -std=c++20 对真生成头文件＋真 jni_zero 头文件＋真 CPython 头文件做语法检查通过，Java 用 javac 对真生成代理类编译通过；Copilot 草稿 3 处真 bug 均已修）
 - [x] CPython 独立控制台（阶段 C）：`PythonConsoleActivity` 纯 Activity＋代码建 UI（照搬指纹 v1 的 `EnvironmentPickerActivity` 模式），独立 LAUNCHER 图标入口（不碰 AppMenu/Settings，v1 最小侵入）；单线程 executor 跑 eval，30 秒看门狗只提示不能中断（CPython 无法从 Java 中断，挂住须杀应用），输出区 20 万字符截断；Manifest 插入点选在 `</activity-alias>` 之后、`ChromeTabbedActivity2` 之前，与指纹补丁的改动点无重叠，003 在有/无指纹补丁两种情况下都能打上（2026-11-21，亲自用 javac＋Android 存根编译通过；`PythonBridge.initialize` 返回 void、失败抛 `IllegalStateException`，控制台按此处理）
+- [x] CPython 自动化桥（阶段 D）：`browser` 模块经 `PyImport_AppendInittab` 在 `Py_InitializeFromConfig` 之前注册，模块方法经 JNI 调 `BrowserBridge` 静态方法（JavaVM＋类全局引用＋6 个 method ID 在 `nativeInitialize` 里缓存，全失败则初始化直接失败）；Java 侧所有 tab 操作经 main Handler＋CountDownLatch 在 UI 线程跑（evalJs 等 30 秒、其余 10 秒，超时返回失败值）；`TabModel` 没有 `getCurrentTab()`（只在 `TabModelSelector` 上），普通模型当前 tab 用 `model.getTabAt(model.index())` 取（`index()` 为 -1 时 `getTabAt` 返回 null，安全）；`TabLaunchType` 是 `java_cpp_enum` 生成的枚举（`//chrome/browser/ui/android/tab_model:enums_java`），常量 `FROM_CHROME_UI`；`AttachCurrentThread` 的 C++ 签名取 `void**`，`JNIEnv**` 须 `reinterpret_cast`（2026-11-21：亲自核对 159 树上 `Tab`/`TabModel`/`TabList`/`TabCreator`/`TabClosureParams`/`WebContents`/`JavaScriptCallback` 签名；`.cc` 用 g++ 对真头文件语法检查通过，Java 用 javac＋按真实签名写的 Chromium 存根编译通过；Copilot 草稿 2 处真 bug 均已修）

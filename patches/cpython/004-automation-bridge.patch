@@ -1,0 +1,681 @@
+diff --git a/chrome/android/chrome_java_sources.gni b/chrome/android/chrome_java_sources.gni
+index 0bd77a8..a2ca7a1 100644
+--- a/chrome/android/chrome_java_sources.gni
++++ b/chrome/android/chrome_java_sources.gni
+@@ -491,6 +491,7 @@ chrome_java_sources = [
+   "java/src/org/chromium/chrome/browser/contextualsearch/SelectionClientManager.java",
+   "java/src/org/chromium/chrome/browser/contextualsearch/TapFarFromPreviousSuppression.java",
+   "java/src/org/chromium/chrome/browser/contextualsearch/TapSuppressionHeuristics.java",
++  "java/src/org/chromium/chrome/browser/cpython/BrowserBridge.java",
+   "java/src/org/chromium/chrome/browser/cpython/PythonBridge.java",
+   "java/src/org/chromium/chrome/browser/cpython/PythonConsoleActivity.java",
+   "java/src/org/chromium/chrome/browser/crash/ChromeMinidumpUploadJobServiceImpl.java",
+diff --git a/chrome/android/cpython/python_bridge.cc b/chrome/android/cpython/python_bridge.cc
+index 90e2008..b6765d2 100644
+--- a/chrome/android/cpython/python_bridge.cc
++++ b/chrome/android/cpython/python_bridge.cc
+@@ -26,6 +26,14 @@ std::atomic<bool> g_initialized(false);
+ // Retained for the process lifetime: PyEval_SaveThread() hands the GIL back
+ // after init so later calls can re-acquire it via PyGILState_Ensure().
+ PyThreadState* g_saved_thread_state = nullptr;
++JavaVM* g_jvm = nullptr;
++jclass g_browser_bridge_class = nullptr;
++jmethodID g_list_tabs_method = nullptr;
++jmethodID g_current_tab_method = nullptr;
++jmethodID g_open_tab_method = nullptr;
++jmethodID g_close_tab_method = nullptr;
++jmethodID g_navigate_method = nullptr;
++jmethodID g_eval_js_method = nullptr;
+ 
+ bool AppendModuleSearchPath(PyConfig* config, const std::string& path) {
+   wchar_t* wide_path = Py_DecodeLocale(path.c_str(), nullptr);
+@@ -115,12 +123,330 @@ void RestoreRedirect(PyObject* sys_module,
+   PyErr_Clear();
+ }
+ 
++class ScopedJNIEnv {
++ public:
++  ScopedJNIEnv() {
++    if (!g_jvm) {
++      return;
++    }
++
++    jint result = g_jvm->GetEnv(reinterpret_cast<void**>(&env_), JNI_VERSION_1_6);
++    if (result == JNI_EDETACHED) {
++      if (g_jvm->AttachCurrentThread(reinterpret_cast<void**>(&env_), nullptr) ==
++          JNI_OK) {
++        attached_ = true;
++      } else {
++        env_ = nullptr;
++      }
++    } else if (result != JNI_OK) {
++      env_ = nullptr;
++    }
++  }
++
++  ~ScopedJNIEnv() {
++    if (attached_) {
++      g_jvm->DetachCurrentThread();
++    }
++  }
++
++  JNIEnv* get() const { return env_; }
++
++ private:
++  JNIEnv* env_ = nullptr;
++  bool attached_ = false;
++};
++
++bool CheckJavaException(JNIEnv* env) {
++  jthrowable exception = env->ExceptionOccurred();
++  if (!exception) {
++    return false;
++  }
++  env->ExceptionClear();
++  env->DeleteLocalRef(exception);
++  PyErr_SetString(PyExc_RuntimeError, "browser: Java call failed");
++  return true;
++}
++
++PyObject* CallStringMethod(jmethodID method) {
++  ScopedJNIEnv scoped_env;
++  JNIEnv* env = scoped_env.get();
++  if (!env || !g_browser_bridge_class || !method) {
++    PyErr_SetString(PyExc_RuntimeError, "browser: JNI bridge unavailable");
++    return nullptr;
++  }
++
++  jstring result = static_cast<jstring>(
++      env->CallStaticObjectMethod(g_browser_bridge_class, method));
++  if (CheckJavaException(env)) {
++    return nullptr;
++  }
++  if (!result) {
++    return PyUnicode_FromString("");
++  }
++
++  // NB: GetStringUTFChars returns Modified UTF-8; PyUnicode_FromString
++  // expects standard UTF-8. The two differ only for U+0000 (impossible in
++  // URLs/titles, JSON-escaped in eval results). If it ever occurs,
++  // PyUnicode_FromString fails loudly with a Python exception — no crash.
++  const char* utf8 = env->GetStringUTFChars(result, nullptr);
++  if (!utf8) {
++    env->DeleteLocalRef(result);
++    if (env->ExceptionCheck()) {
++      env->ExceptionClear();
++    }
++    PyErr_SetString(PyExc_RuntimeError, "browser: Java call failed");
++    return nullptr;
++  }
++  PyObject* python_result = PyUnicode_FromString(utf8);
++  env->ReleaseStringUTFChars(result, utf8);
++  env->DeleteLocalRef(result);
++  return python_result;
++}
++
++PyObject* BrowserListTabs(PyObject*, PyObject* args) {
++  if (!PyArg_ParseTuple(args, ":list_tabs")) {
++    return nullptr;
++  }
++  return CallStringMethod(g_list_tabs_method);
++}
++
++PyObject* BrowserCurrentTab(PyObject*, PyObject* args) {
++  if (!PyArg_ParseTuple(args, ":current_tab")) {
++    return nullptr;
++  }
++  return CallStringMethod(g_current_tab_method);
++}
++
++PyObject* BrowserOpenTab(PyObject*, PyObject* args) {
++  const char* url = nullptr;
++  if (!PyArg_ParseTuple(args, "s:open_tab", &url)) {
++    return nullptr;
++  }
++
++  ScopedJNIEnv scoped_env;
++  JNIEnv* env = scoped_env.get();
++  if (!env || !g_browser_bridge_class || !g_open_tab_method) {
++    PyErr_SetString(PyExc_RuntimeError, "browser: JNI bridge unavailable");
++    return nullptr;
++  }
++  base::android::ScopedJavaLocalRef<jstring> java_url =
++      base::android::ConvertUTF8ToJavaString(env, url);
++  if (CheckJavaException(env) || !java_url) {
++    if (!PyErr_Occurred()) {
++      PyErr_SetString(PyExc_RuntimeError, "browser: Java call failed");
++    }
++    return nullptr;
++  }
++  jint result = env->CallStaticIntMethod(
++      g_browser_bridge_class, g_open_tab_method, java_url.obj());
++  if (CheckJavaException(env)) {
++    return nullptr;
++  }
++  return PyLong_FromLong(result);
++}
++
++PyObject* BrowserCloseTab(PyObject*, PyObject* args) {
++  int tab_id = 0;
++  if (!PyArg_ParseTuple(args, "i:close_tab", &tab_id)) {
++    return nullptr;
++  }
++
++  ScopedJNIEnv scoped_env;
++  JNIEnv* env = scoped_env.get();
++  if (!env || !g_browser_bridge_class || !g_close_tab_method) {
++    PyErr_SetString(PyExc_RuntimeError, "browser: JNI bridge unavailable");
++    return nullptr;
++  }
++  jboolean result = env->CallStaticBooleanMethod(
++      g_browser_bridge_class, g_close_tab_method, static_cast<jint>(tab_id));
++  if (CheckJavaException(env)) {
++    return nullptr;
++  }
++  return PyBool_FromLong(result == JNI_TRUE);
++}
++
++PyObject* BrowserNavigate(PyObject*, PyObject* args) {
++  int tab_id = 0;
++  const char* url = nullptr;
++  if (!PyArg_ParseTuple(args, "is:navigate", &tab_id, &url)) {
++    return nullptr;
++  }
++
++  ScopedJNIEnv scoped_env;
++  JNIEnv* env = scoped_env.get();
++  if (!env || !g_browser_bridge_class || !g_navigate_method) {
++    PyErr_SetString(PyExc_RuntimeError, "browser: JNI bridge unavailable");
++    return nullptr;
++  }
++  base::android::ScopedJavaLocalRef<jstring> java_url =
++      base::android::ConvertUTF8ToJavaString(env, url);
++  if (CheckJavaException(env) || !java_url) {
++    if (!PyErr_Occurred()) {
++      PyErr_SetString(PyExc_RuntimeError, "browser: Java call failed");
++    }
++    return nullptr;
++  }
++  jboolean result = env->CallStaticBooleanMethod(
++      g_browser_bridge_class, g_navigate_method, static_cast<jint>(tab_id),
++      java_url.obj());
++  if (CheckJavaException(env)) {
++    return nullptr;
++  }
++  return PyBool_FromLong(result == JNI_TRUE);
++}
++
++PyObject* BrowserEvalJs(PyObject*, PyObject* args) {
++  int tab_id = 0;
++  const char* script = nullptr;
++  if (!PyArg_ParseTuple(args, "is:eval_js", &tab_id, &script)) {
++    return nullptr;
++  }
++
++  ScopedJNIEnv scoped_env;
++  JNIEnv* env = scoped_env.get();
++  if (!env || !g_browser_bridge_class || !g_eval_js_method) {
++    PyErr_SetString(PyExc_RuntimeError, "browser: JNI bridge unavailable");
++    return nullptr;
++  }
++  base::android::ScopedJavaLocalRef<jstring> java_script =
++      base::android::ConvertUTF8ToJavaString(env, script);
++  if (CheckJavaException(env) || !java_script) {
++    if (!PyErr_Occurred()) {
++      PyErr_SetString(PyExc_RuntimeError, "browser: Java call failed");
++    }
++    return nullptr;
++  }
++  jstring result = static_cast<jstring>(env->CallStaticObjectMethod(
++      g_browser_bridge_class, g_eval_js_method,
++      static_cast<jint>(tab_id), java_script.obj()));
++  if (CheckJavaException(env)) {
++    return nullptr;
++  }
++  if (!result) {
++    return PyUnicode_FromString("");
++  }
++
++  const char* utf8 = env->GetStringUTFChars(result, nullptr);
++  if (!utf8) {
++    env->DeleteLocalRef(result);
++    if (env->ExceptionCheck()) {
++      env->ExceptionClear();
++    }
++    PyErr_SetString(PyExc_RuntimeError, "browser: Java call failed");
++    return nullptr;
++  }
++  PyObject* python_result = PyUnicode_FromString(utf8);
++  env->ReleaseStringUTFChars(result, utf8);
++  env->DeleteLocalRef(result);
++  return python_result;
++}
++
++PyMethodDef kBrowserMethods[] = {
++    {"list_tabs", BrowserListTabs, METH_VARARGS, nullptr},
++    {"current_tab", BrowserCurrentTab, METH_VARARGS, nullptr},
++    {"open_tab", BrowserOpenTab, METH_VARARGS, nullptr},
++    {"close_tab", BrowserCloseTab, METH_VARARGS, nullptr},
++    {"navigate", BrowserNavigate, METH_VARARGS, nullptr},
++    {"eval_js", BrowserEvalJs, METH_VARARGS, nullptr},
++    {nullptr, nullptr, 0, nullptr},
++};
++
++PyModuleDef kBrowserModule = {
++    PyModuleDef_HEAD_INIT,
++    "browser",
++    nullptr,
++    -1,
++    kBrowserMethods,
++    nullptr,
++    nullptr,
++    nullptr,
++    nullptr,
++};
++
++PyObject* PyInit_browser() {
++  if (!g_jvm) {
++    PyErr_SetString(PyExc_ImportError,
++                    "browser: CPython bridge not initialized");
++    return nullptr;
++  }
++  return PyModule_Create(&kBrowserModule);
++}
++
++bool CacheBrowserBridge(JNIEnv* env) {
++  JavaVM* jvm = nullptr;
++  if (env->GetJavaVM(&jvm) != JNI_OK || !jvm) {
++    LOG(ERROR) << "Unable to get JavaVM for CPython browser bridge";
++    return false;
++  }
++
++  jclass local_class =
++      env->FindClass("org/chromium/chrome/browser/cpython/BrowserBridge");
++  if (env->ExceptionCheck() || !local_class) {
++    env->ExceptionClear();
++    LOG(ERROR) << "Unable to find BrowserBridge class";
++    return false;
++  }
++  jclass global_class = static_cast<jclass>(env->NewGlobalRef(local_class));
++  env->DeleteLocalRef(local_class);
++  if (env->ExceptionCheck() || !global_class) {
++    env->ExceptionClear();
++    LOG(ERROR) << "Unable to retain BrowserBridge class";
++    return false;
++  }
++
++  auto get_method = [env, global_class](const char* name,
++                                        const char* signature) -> jmethodID {
++    jmethodID method = env->GetStaticMethodID(global_class, name, signature);
++    if (env->ExceptionCheck()) {
++      env->ExceptionClear();
++      return nullptr;
++    }
++    return method;
++  };
++  jmethodID list_tabs =
++      get_method("listTabs", "()Ljava/lang/String;");
++  jmethodID current_tab =
++      list_tabs ? get_method("currentTab", "()Ljava/lang/String;") : nullptr;
++  jmethodID open_tab = current_tab
++                           ? get_method("openTab", "(Ljava/lang/String;)I")
++                           : nullptr;
++  jmethodID close_tab = open_tab ? get_method("closeTab", "(I)Z") : nullptr;
++  jmethodID navigate = close_tab
++                           ? get_method("navigate", "(ILjava/lang/String;)Z")
++                           : nullptr;
++  jmethodID eval_js =
++      navigate ? get_method("evalJs",
++                            "(ILjava/lang/String;)Ljava/lang/String;")
++               : nullptr;
++  if (!list_tabs || !current_tab || !open_tab || !close_tab || !navigate ||
++      !eval_js) {
++    env->DeleteGlobalRef(global_class);
++    LOG(ERROR) << "Unable to cache BrowserBridge methods";
++    return false;
++  }
++
++  g_jvm = jvm;
++  g_browser_bridge_class = global_class;
++  g_list_tabs_method = list_tabs;
++  g_current_tab_method = current_tab;
++  g_open_tab_method = open_tab;
++  g_close_tab_method = close_tab;
++  g_navigate_method = navigate;
++  g_eval_js_method = eval_js;
++  return true;
++}
++
+ }  // namespace
+ 
+ bool Initialize(const std::string& stdlib_dir,
+                 const std::string& native_lib_dir,
+                 const std::string& cache_dir) {
+   std::call_once(g_initialize_once, [&]() {
++    if (PyImport_AppendInittab("browser", &PyInit_browser) != 0) {
++      LOG(ERROR) << "Unable to register CPython browser module";
++      return;
++    }
++
+     mkdir(cache_dir.c_str(), 0700);
+ 
+     PyConfig config;
+@@ -282,6 +608,9 @@ static bool JNI_PythonBridge_NativeInitialize(
+     const base::android::JavaRef<jstring>& stdlib_dir,
+     const base::android::JavaRef<jstring>& native_lib_dir,
+     const base::android::JavaRef<jstring>& cache_dir) {
++  if (!CacheBrowserBridge(env)) {
++    return false;
++  }
+   std::string stdlib = base::android::ConvertJavaStringToUTF8(env, stdlib_dir);
+   std::string native_lib =
+       base::android::ConvertJavaStringToUTF8(env, native_lib_dir);
+diff --git a/chrome/android/java/src/org/chromium/chrome/browser/cpython/BrowserBridge.java b/chrome/android/java/src/org/chromium/chrome/browser/cpython/BrowserBridge.java
+new file mode 100644
+index 0000000..c60e104
+--- /dev/null
++++ b/chrome/android/java/src/org/chromium/chrome/browser/cpython/BrowserBridge.java
+@@ -0,0 +1,303 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++package org.chromium.chrome.browser.cpython;
++
++import android.app.Activity;
++import android.os.Handler;
++import android.os.Looper;
++
++import org.chromium.base.ApplicationStatus;
++import org.chromium.build.annotations.NullMarked;
++import org.chromium.build.annotations.Nullable;
++import org.chromium.chrome.browser.ChromeTabbedActivity;
++import org.chromium.chrome.browser.tab.Tab;
++import org.chromium.chrome.browser.tab.TabLaunchType;
++import org.chromium.chrome.browser.tabmodel.ChromeTabCreator;
++import org.chromium.chrome.browser.tabmodel.TabClosureParams;
++import org.chromium.chrome.browser.tabmodel.TabModel;
++import org.chromium.chrome.browser.tabmodel.TabModelSelector;
++import org.chromium.content_public.browser.JavaScriptCallback;
++import org.chromium.content_public.browser.LoadUrlParams;
++import org.chromium.content_public.browser.WebContents;
++import org.chromium.url.GURL;
++
++import java.util.concurrent.Callable;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicReference;
++
++/**
++ * UI-thread adapter for CPython browser automation.
++ *
++ * <p>Never call back into Python from UI-thread work: Python can hold the GIL
++ * while waiting for these calls, which would deadlock a UI-thread callback.
++ */
++@NullMarked
++public final class BrowserBridge {
++    private static final long DEFAULT_TIMEOUT_SECONDS = 10;
++    private static final long EVAL_TIMEOUT_SECONDS = 30;
++
++    private BrowserBridge() {}
++
++    /** Returns the normal tab model as a JSON array. */
++    public static String listTabs() {
++        return runOnUiThread(
++                () -> {
++                    ChromeTabbedActivity activity = getForegroundActivity();
++                    if (activity == null) {
++                        return "[]";
++                    }
++                    TabModel model = getNormalModel(activity);
++                    // Current tab OF THE NORMAL MODEL: index() is -1 when
++                    // empty and getTabAt() returns null for it, so this is
++                    // safe. (Do NOT use selector.getCurrentTab() here — it
++                    // follows the selected model, which may be incognito.)
++                    @Nullable Tab currentTab = model.getTabAt(model.index());
++                    StringBuilder json = new StringBuilder("[");
++                    for (int i = 0; i < model.getCount(); i++) {
++                        @Nullable Tab tab = model.getTabAt(i);
++                        if (tab == null) {
++                            continue;
++                        }
++                        if (json.length() > 1) {
++                            json.append(',');
++                        }
++                        appendTabJson(json, tab, currentTab);
++                    }
++                    return json.append(']').toString();
++                },
++                "[]");
++    }
++
++    /** Returns the selected normal tab as JSON, or {@code "null"} if absent. */
++    public static String currentTab() {
++        return runOnUiThread(
++                () -> {
++                    ChromeTabbedActivity activity = getForegroundActivity();
++                    if (activity == null) {
++                        return "null";
++                    }
++                    TabModel model = getNormalModel(activity);
++                    // Current tab of the normal model (see listTabs()).
++                    @Nullable Tab tab = model.getTabAt(model.index());
++                    if (tab == null) {
++                        return "null";
++                    }
++                    StringBuilder json = new StringBuilder();
++                    appendTabJson(json, tab, tab);
++                    return json.toString();
++                },
++                "null");
++    }
++
++    /** Opens a URL in a new normal tab and returns its tab id, or {@code -1}. */
++    public static int openTab(String url) {
++        return runOnUiThread(
++                () -> {
++                    ChromeTabbedActivity activity = getForegroundActivity();
++                    if (activity == null) {
++                        return -1;
++                    }
++                    ChromeTabCreator creator = activity.getTabCreator(false);
++                    @Nullable Tab tab =
++                            creator.createNewTab(
++                                    new LoadUrlParams(url),
++                                    TabLaunchType.FROM_CHROME_UI,
++                                    null);
++                    return tab == null ? -1 : tab.getId();
++                },
++                -1);
++    }
++
++    /** Closes the normal tab with {@code tabId}, returning whether it was found. */
++    public static boolean closeTab(int tabId) {
++        return runOnUiThread(
++                () -> {
++                    ChromeTabbedActivity activity = getForegroundActivity();
++                    if (activity == null) {
++                        return false;
++                    }
++                    TabModel model = getNormalModel(activity);
++                    @Nullable Tab tab = findTabById(model, tabId);
++                    if (tab == null) {
++                        return false;
++                    }
++                    model.getTabRemover()
++                            .closeTabs(TabClosureParams.closeTab(tab).build(), false);
++                    return true;
++                },
++                false);
++    }
++
++    /** Navigates the normal tab with {@code tabId}, returning whether it exists. */
++    public static boolean navigate(int tabId, String url) {
++        return runOnUiThread(
++                () -> {
++                    ChromeTabbedActivity activity = getForegroundActivity();
++                    if (activity == null) {
++                        return false;
++                    }
++                    @Nullable Tab tab = findTabById(getNormalModel(activity), tabId);
++                    if (tab == null) {
++                        return false;
++                    }
++                    tab.loadUrl(new LoadUrlParams(url));
++                    return true;
++                },
++                false);
++    }
++
++    /** Evaluates JavaScript in the normal tab; returns its JSON result or an error. */
++    public static String evalJs(int tabId, String script) {
++        CountDownLatch latch = new CountDownLatch(1);
++        AtomicReference<String> result =
++                new AtomicReference<>("ERROR: no foreground browser window");
++        boolean posted =
++                new Handler(Looper.getMainLooper())
++                        .post(
++                                () -> {
++                                    try {
++                                        ChromeTabbedActivity activity =
++                                                getForegroundActivity();
++                                        if (activity == null) {
++                                            latch.countDown();
++                                            return;
++                                        }
++                                        @Nullable Tab tab =
++                                                findTabById(
++                                                        getNormalModel(activity), tabId);
++                                        if (tab == null) {
++                                            result.set("ERROR: tab not found");
++                                            latch.countDown();
++                                            return;
++                                        }
++                                        @Nullable WebContents webContents =
++                                                tab.getWebContents();
++                                        if (webContents == null) {
++                                            result.set(
++                                                    "ERROR: tab has no web contents");
++                                            latch.countDown();
++                                            return;
++                                        }
++                                        webContents.evaluateJavaScript(
++                                                script,
++                                                new JavaScriptCallback() {
++                                                    @Override
++                                                    public void handleJavaScriptResult(
++                                                            String jsonResult) {
++                                                        result.set(
++                                                                jsonResult == null
++                                                                        ? ""
++                                                                        : jsonResult);
++                                                        latch.countDown();
++                                                    }
++                                                });
++                                    } catch (RuntimeException exception) {
++                                        result.set(
++                                                "ERROR: JavaScript evaluation failed");
++                                        latch.countDown();
++                                    }
++                                });
++        if (!posted) {
++            return "ERROR: unable to post to UI thread";
++        }
++        try {
++            if (!latch.await(EVAL_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
++                return "ERROR: timeout";
++            }
++        } catch (InterruptedException exception) {
++            Thread.currentThread().interrupt();
++            return "ERROR: interrupted";
++        }
++        return result.get();
++    }
++
++    private static <T> T runOnUiThread(Callable<T> action, T failureValue) {
++        CountDownLatch latch = new CountDownLatch(1);
++        AtomicReference<T> result = new AtomicReference<>(failureValue);
++        boolean posted =
++                new Handler(Looper.getMainLooper())
++                        .post(
++                                () -> {
++                                    try {
++                                        result.set(action.call());
++                                    } catch (Exception exception) {
++                                        result.set(failureValue);
++                                    } finally {
++                                        latch.countDown();
++                                    }
++                                });
++        if (!posted) {
++            return failureValue;
++        }
++        try {
++            if (!latch.await(DEFAULT_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
++                return failureValue;
++            }
++        } catch (InterruptedException exception) {
++            Thread.currentThread().interrupt();
++            return failureValue;
++        }
++        return result.get();
++    }
++
++    private static @Nullable ChromeTabbedActivity getForegroundActivity() {
++        @Nullable Activity activity =
++                ApplicationStatus.getLastTrackedFocusedActivity();
++        return activity instanceof ChromeTabbedActivity
++                ? (ChromeTabbedActivity) activity
++                : null;
++    }
++
++    private static TabModel getNormalModel(ChromeTabbedActivity activity) {
++        TabModelSelector selector = activity.getTabModelSelector();
++        return selector.getModel(false);
++    }
++
++    private static @Nullable Tab findTabById(TabModel model, int tabId) {
++        for (int i = 0; i < model.getCount(); i++) {
++            @Nullable Tab tab = model.getTabAt(i);
++            if (tab != null && tab.getId() == tabId) {
++                return tab;
++            }
++        }
++        return null;
++    }
++
++    private static void appendTabJson(
++            StringBuilder json, Tab tab, @Nullable Tab currentTab) {
++        @Nullable GURL tabUrl = tab.getUrl();
++        String url = tabUrl == null ? "" : tabUrl.toString();
++        @Nullable String tabTitle = tab.getTitle();
++        String title = tabTitle == null ? "" : tabTitle;
++        json.append("{\"id\":")
++                .append(tab.getId())
++                .append(",\"url\":\"")
++                .append(escapeJson(url))
++                .append("\",\"title\":\"")
++                .append(escapeJson(title))
++                .append("\",\"current\":")
++                .append(currentTab != null && currentTab.getId() == tab.getId())
++                .append('}');
++    }
++
++    private static String escapeJson(String value) {
++        StringBuilder escaped = new StringBuilder(value.length());
++        char[] hex = "0123456789abcdef".toCharArray();
++        for (int i = 0; i < value.length(); i++) {
++            char character = value.charAt(i);
++            if (character == '"' || character == '\\') {
++                escaped.append('\\').append(character);
++            } else if (character < 0x20) {
++                escaped.append("\\u00")
++                        .append(hex[(character >> 4) & 0x0f])
++                        .append(hex[character & 0x0f]);
++            } else {
++                escaped.append(character);
++            }
++        }
++        return escaped.toString();
++    }
++}
