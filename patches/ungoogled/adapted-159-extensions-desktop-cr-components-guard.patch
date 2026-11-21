@@ -24,6 +24,20 @@ index 2a7fa64..ac65265 100644
    webui_context_type = "trusted"
    optimize = optimize_webui
    if (optimize) {
+diff --git a/chrome/browser/resources/extensions/item_list.html.ts b/chrome/browser/resources/extensions/item_list.html.ts
+index 054f137..1c3b199 100644
+--- a/chrome/browser/resources/extensions/item_list.html.ts
++++ b/chrome/browser/resources/extensions/item_list.html.ts
+@@ -12,7 +12,9 @@ export function getHtml(this: ExtensionsItemListElement) {
+   // clang-format off
+   return html`<!--_html_template_start_-->
+ <div id="container">
++<if expr="not is_android and not is_ios or is_desktop_android">
+   <managed-footnote ?hidden="${!!this.filter}"></managed-footnote>
++</if>
+   <div id="content-wrapper" .style="--max-columns: ${this.maxColumns_};">
+     ${this.showSafetyCheckReviewPanel_ ? html`
+       <div class="items-container panel">
 diff --git a/chrome/browser/resources/extensions/item_list.ts b/chrome/browser/resources/extensions/item_list.ts
 index c0a7ca6..35e6cdf 100644
 --- a/chrome/browser/resources/extensions/item_list.ts
