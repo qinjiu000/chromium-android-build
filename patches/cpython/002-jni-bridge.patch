@@ -11,10 +11,30 @@ index e7bfa73..732a20b 100644
        "//chrome/browser:chrome_content_browser_client",
        "//chrome/browser:defaults",
 diff --git a/chrome/android/BUILD.gn b/chrome/android/BUILD.gn
-index 248d242..1b600a1 100644
+index 248d242..1e018e8 100644
 --- a/chrome/android/BUILD.gn
 +++ b/chrome/android/BUILD.gn
-@@ -3023,6 +3023,7 @@ if (_is_default_toolchain) {
+@@ -2214,6 +2214,7 @@ if (_is_default_toolchain) {
+       "java/src/org/chromium/chrome/browser/base/SplitCompatUtils.java",
+       "java/src/org/chromium/chrome/browser/base/SplitPreloader.java",
+       "java/src/org/chromium/chrome/browser/bookmarkswidget/BookmarkWidgetService.java",
++      "java/src/org/chromium/chrome/browser/cpython/PythonBridge.java",
+       "java/src/org/chromium/chrome/browser/crash/ChromeMinidumpUploadJobService.java",
+       "java/src/org/chromium/chrome/browser/crash/MinidumpUploadService.java",
+       "java/src/org/chromium/chrome/browser/customtabs/CustomTabsConnectionService.java",
+@@ -2305,7 +2306,10 @@ if (_is_default_toolchain) {
+       deps += [ "//chrome/android/modules/dev_ui/provider:java" ]
+     }
+ 
+-    srcjar_deps = [ ":base_module_jni" ]
++    srcjar_deps = [
++      ":base_module_jni",
++      "//chrome/android/cpython:jni_headers",
++    ]
+ 
+     # If this throws an error, try depending on
+     # //content/public/android:content_main_dex_java instead.
+@@ -3023,6 +3027,7 @@ if (_is_default_toolchain) {
    group("jni_headers") {
      public_deps = [
        ":chrome_jni_headers",
@@ -22,18 +42,6 @@ index 248d242..1b600a1 100644
        "//chrome/android/features/keyboard_accessory:jni_headers",
        "//chrome/browser/android/browserservices/metrics:jni_headers($default_toolchain)",
        "//chrome/browser/android/browserservices/verification:jni_headers",
-diff --git a/chrome/android/chrome_java_sources.gni b/chrome/android/chrome_java_sources.gni
-index d93b36d..9ab16ba 100644
---- a/chrome/android/chrome_java_sources.gni
-+++ b/chrome/android/chrome_java_sources.gni
-@@ -491,6 +491,7 @@ chrome_java_sources = [
-   "java/src/org/chromium/chrome/browser/contextualsearch/SelectionClientManager.java",
-   "java/src/org/chromium/chrome/browser/contextualsearch/TapFarFromPreviousSuppression.java",
-   "java/src/org/chromium/chrome/browser/contextualsearch/TapSuppressionHeuristics.java",
-+  "java/src/org/chromium/chrome/browser/cpython/PythonBridge.java",
-   "java/src/org/chromium/chrome/browser/crash/ChromeMinidumpUploadJobServiceImpl.java",
-   "java/src/org/chromium/chrome/browser/crash/ChromeMinidumpUploaderDelegate.java",
-   "java/src/org/chromium/chrome/browser/crash/ChromePureJavaExceptionReporter.java",
 diff --git a/chrome/android/cpython/BUILD.gn b/chrome/android/cpython/BUILD.gn
 index 3f16623..a15e29b 100644
 --- a/chrome/android/cpython/BUILD.gn

@@ -1,11 +1,11 @@
 diff --git a/chrome/android/chrome_java_sources.gni b/chrome/android/chrome_java_sources.gni
-index 9ab16ba..0bd77a8 100644
+index d93b36d..09cdd1e 100644
 --- a/chrome/android/chrome_java_sources.gni
 +++ b/chrome/android/chrome_java_sources.gni
-@@ -492,6 +492,7 @@ chrome_java_sources = [
+@@ -491,6 +491,7 @@ chrome_java_sources = [
+   "java/src/org/chromium/chrome/browser/contextualsearch/SelectionClientManager.java",
    "java/src/org/chromium/chrome/browser/contextualsearch/TapFarFromPreviousSuppression.java",
    "java/src/org/chromium/chrome/browser/contextualsearch/TapSuppressionHeuristics.java",
-   "java/src/org/chromium/chrome/browser/cpython/PythonBridge.java",
 +  "java/src/org/chromium/chrome/browser/cpython/PythonConsoleActivity.java",
    "java/src/org/chromium/chrome/browser/crash/ChromeMinidumpUploadJobServiceImpl.java",
    "java/src/org/chromium/chrome/browser/crash/ChromeMinidumpUploaderDelegate.java",
