@@ -87,6 +87,24 @@ git diff --check ||
   { echo "FATAL: fingerprint patches left whitespace errors" >&2; exit 3; }
 echo "Fingerprint patches applied: $(grep -c . "$FINGERPRINT_DIR/series") patches"
 
+# Apply the CPython patch set (phase 3; see patches/cpython/series).
+# Applied AFTER the fingerprint set; the two sets touch disjoint files.
+CPYTHON_DIR="$ROOT/patches/cpython"
+if [ ! -f "$CPYTHON_DIR/series" ]; then
+  echo "ERROR: missing CPython patch series: $CPYTHON_DIR/series" >&2
+  exit 2
+fi
+while IFS= read -r patch; do
+  [ -n "$patch" ] || continue
+  git apply --check "$CPYTHON_DIR/$patch" ||
+    { echo "FATAL: CPython patch $patch does not apply cleanly to this tree" >&2; exit 3; }
+  git apply "$CPYTHON_DIR/$patch" ||
+    { echo "FATAL: failed to apply CPython patch $patch" >&2; exit 3; }
+done < "$CPYTHON_DIR/series"
+git diff --check ||
+  { echo "FATAL: CPython patches left whitespace errors" >&2; exit 3; }
+echo "CPython patches applied: $(grep -c . "$CPYTHON_DIR/series") patches"
+
 # Apply the selective de-Google patch set (ungoogled-chromium 158 patches,
 # adapted for 159; see patches/ungoogled/series). Applied AFTER the stealth
 # patch — the set was verified against the stealth-patched tree. Each patch
@@ -113,6 +131,12 @@ echo "De-Google patches applied: $(grep -c . "$UNGOOGLED_DIR/series") patches"
 # kept services (Google Search, Web Store, Safe Browsing endpoints).
 python3 "$ROOT/scripts/domain_substitution.py" "$WORKSPACE/src" ||
   { echo "FATAL: domain substitution failed" >&2; exit 3; }
+
+# Fetch the CPython prebuilt (phase 3) into the tree — BEFORE gn gen, and
+# BEFORE the mtime normalization below so the fetched files also get the
+# fixed epoch. Idempotent: later hops reuse the transferred prebuilt dir.
+bash "$ROOT/scripts/fetch_python.sh" "$WORKSPACE/src" arm64-v8a ||
+  { echo "FATAL: CPython fetch failed" >&2; exit 3; }
 
 OUT_DIR="out/${CAB_BUILD_TYPE}"
 

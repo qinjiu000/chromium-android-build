@@ -1,0 +1,171 @@
+diff --git a/chrome/android/BUILD.gn b/chrome/android/BUILD.gn
+index 642d257..248d242 100644
+--- a/chrome/android/BUILD.gn
++++ b/chrome/android/BUILD.gn
+@@ -7,6 +7,7 @@ import("//build/config/cronet/config.gni")
+ import("//build/toolchain/gcc_toolchain.gni")
+ 
+ import("//chrome/android/chrome_common_shared_library.gni")
++import("//chrome/android/cpython/python_native_libs.gni")
+ import("//chrome/android/modules/chrome_feature_module_tmpl.gni")
+ import("//components/supervised_user/buildflags.gni")
+ 
+@@ -2120,6 +2121,11 @@ if (_is_default_toolchain) {
+   chrome_public_apk_or_module_tmpl("chrome_public_apk") {
+     target_type = "android_apk"
+     apk_name = "ChromePublic"
++
++    # CPython (phase 3, stage A): prebuilt interpreter libraries, packaged
++    # as native libs, and the stdlib zip asset.
++    loadable_modules = python_native_libs
++    asset_deps = [ "//chrome/android/cpython:python_stdlib_assets" ]
+     if (defined(android_app_secondary_abi)) {
+       # Ensure 64-bit chrome does not depend on 32-bit things.
+       assert_no_deps =
+diff --git a/chrome/android/cpython/BUILD.gn b/chrome/android/cpython/BUILD.gn
+new file mode 100644
+index 0000000..3f16623
+--- /dev/null
++++ b/chrome/android/cpython/BUILD.gn
+@@ -0,0 +1,18 @@
++# Copyright 2026 The Chromium Authors
++# Use of this source code is governed by a BSD-style license that can be
++# found in the LICENSE file.
++
++# Native CPython embedding (phase 3). Stage A: package the prebuilt
++# interpreter libraries (via loadable_modules on chrome_public_apk, see
++# python_native_libs.gni) and the stdlib zip as an APK asset. The JNI
++# bridge (stage B) adds the targets that link against libpython here.
++
++import("//build/config/android/rules.gni")
++import("python_native_libs.gni")
++
++# Stdlib zip, extracted once at first Python init (see PythonBridge).
++android_assets("python_stdlib_assets") {
++  renaming_sources = [ python_stdlib_zip ]
++  renaming_destinations = [ "python_stdlib.zip" ]
++  disable_compression = true
++}
+diff --git a/chrome/android/cpython/python_native_libs.gni b/chrome/android/cpython/python_native_libs.gni
+new file mode 100644
+index 0000000..ce3c260
+--- /dev/null
++++ b/chrome/android/cpython/python_native_libs.gni
+@@ -0,0 +1,117 @@
++# Copyright 2026 The Chromium Authors
++# Use of this source code is governed by a BSD-style license that can be
++# found in the LICENSE file.
++
++# Prebuilt CPython 3.13.16 (Chaquopy target:3.13.16-0) native libraries.
++#
++# The files are fetched by scripts/fetch_python.sh into
++# chrome/android/cpython/prebuilt/<abi>/ BEFORE `gn gen` runs (both
++# build_android.sh and verify.yml do this). The ABI zip layout is preserved:
++#   jniLibs/<abi>/        libpython3.13 + ssl/crypto/sqlite companions
++#   lib-dynload/<abi>/    extension modules
++#   include/python3.13/   headers (used by the JNI bridge, not packaged)
++#   stdlib.zip            stdlib, packaged as an APK asset (see BUILD.gn)
++#
++# Only the four real libraries are packaged: libpython3.so and the three
++# *_chaquopy.so files are ~4KB link-time/loader shims that nothing NEEDEDs
++# (verified with readelf over all 65 .so files, 2026-11-21).
++
++if (target_cpu == "arm64") {
++  _python_abi = "arm64-v8a"
++  _python_triple = "aarch64"
++} else if (target_cpu == "x64") {
++  _python_abi = "x86_64"
++  _python_triple = "x86_64"
++} else {
++  assert(false, "CPython prebuilt is only available for arm64 and x64")
++}
++
++_python_prebuilt_dir = "//chrome/android/cpython/prebuilt/$_python_abi"
++
++# Interpreter + companion libraries (DT_NEEDED targets of the extension
++# modules: _ssl needs libssl_python/libcrypto_python, _sqlite3 needs
++# libsqlite3_python, everything needs libpython3.13).
++python_native_libs = [
++  "$_python_prebuilt_dir/jniLibs/$_python_abi/libpython3.13.so",
++  "$_python_prebuilt_dir/jniLibs/$_python_abi/libssl_python.so",
++  "$_python_prebuilt_dir/jniLibs/$_python_abi/libcrypto_python.so",
++  "$_python_prebuilt_dir/jniLibs/$_python_abi/libsqlite3_python.so",
++]
++
++# Extension modules, all 57 from the frozen 3.13.16-0 target zip (including
++# the xx* test modules; keeping the frozen set avoids a missing-module
++# ImportError at runtime for negligible size).
++_python_dynload_modules = [
++  "_asyncio",
++  "_bisect",
++  "_blake2",
++  "_bz2",
++  "_codecs_cn",
++  "_codecs_hk",
++  "_codecs_iso2022",
++  "_codecs_jp",
++  "_codecs_kr",
++  "_codecs_tw",
++  "_contextvars",
++  "_csv",
++  "_ctypes",
++  "_datetime",
++  "_decimal",
++  "_elementtree",
++  "_hashlib",
++  "_heapq",
++  "_interpchannels",
++  "_interpqueues",
++  "_interpreters",
++  "_json",
++  "_lsprof",
++  "_lzma",
++  "_md5",
++  "_multibytecodec",
++  "_opcode",
++  "_pickle",
++  "_posixsubprocess",
++  "_queue",
++  "_random",
++  "_sha1",
++  "_sha2",
++  "_sha3",
++  "_socket",
++  "_sqlite3",
++  "_ssl",
++  "_statistics",
++  "_struct",
++  "_xxtestfuzz",
++  "_zoneinfo",
++  "array",
++  "binascii",
++  "cmath",
++  "fcntl",
++  "math",
++  "mmap",
++  "pyexpat",
++  "resource",
++  "select",
++  "syslog",
++  "termios",
++  "unicodedata",
++  "xxlimited",
++  "xxlimited_35",
++  "xxsubtype",
++  "zlib",
++]
++
++foreach(_module, _python_dynload_modules) {
++  python_native_libs += [
++    "$_python_prebuilt_dir/lib-dynload/$_python_abi/${_module}.cpython-313-${_python_triple}-linux-android.so",
++  ]
++}
++
++# Stdlib zip (APK asset, extracted once at first Python init).
++python_stdlib_zip = "$_python_prebuilt_dir/stdlib.zip"
++
++# Header dir for compiling the JNI bridge (stage B).
++python_include_dir = "$_python_prebuilt_dir/include/python3.13"
++
++# Link dir for -lpython3.13 (stage B).
++python_lib_dir = "$_python_prebuilt_dir/jniLibs/$_python_abi"

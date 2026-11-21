@@ -30,7 +30,9 @@ on:
     paths:
       - "android_stealth.patch"
       - "patches/fingerprint/**"
+      - "patches/cpython/**"
       - "scripts/fetch_chromium.sh"
+      - "scripts/fetch_python.sh"
       - "scripts/build_android.sh"
       - "config/chromium/**"
 
@@ -120,6 +122,14 @@ jobs:
             done < "$GITHUB_WORKSPACE/patches/fingerprint/series"
             echo "--- git diff --check (after fingerprint patches) ---"
             git -C chromium/src diff --check
+            echo "--- CPython patch set (series order) ---"
+            while IFS= read -r patch; do
+              [ -n "$patch" ] || continue
+              git -C chromium/src apply --check "$GITHUB_WORKSPACE/patches/cpython/$patch"
+              git -C chromium/src apply "$GITHUB_WORKSPACE/patches/cpython/$patch"
+            done < "$GITHUB_WORKSPACE/patches/cpython/series"
+            echo "--- git diff --check (after CPython patches) ---"
+            git -C chromium/src diff --check
             echo "--- de-Google patch set (series order) ---"
             while IFS= read -r patch; do
               [ -n "$patch" ] || continue
@@ -134,6 +144,21 @@ jobs:
             git -C chromium/src diff --stat
             echo "PATCHES: PASS"
           } 2>&1 | tee verify-logs/40-patches.txt
+
+      # ---- stage: CPython prebuilt fetch ------------------------------------
+      # The cpython GN targets reference the unpacked files (android_assets
+      # sources are existence-checked at gen time), so the fetch must run
+      # after the patches and before gn gen. Same script build_android.sh
+      # uses; arm64-v8a matches both args files (target_cpu = "arm64").
+      - name: Fetch CPython prebuilt (fetch_python.sh)
+        id: cpython
+        if: ${{ always() && steps.fetch.outcome == 'success' && steps.tag.outcome == 'success' && steps.patches.outcome == 'success' }}
+        timeout-minutes: 10
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          bash scripts/fetch_python.sh "$PWD/chromium/src" arm64-v8a 2>&1 | tee verify-logs/45-cpython.txt
+          echo "CPYTHON: PASS" | tee -a verify-logs/45-cpython.txt
 
       # ---- stage: GN args validation (gen only, no compile) ---------------
       # gn gen fails on unknown/invalid args, so a PASS here proves both
@@ -164,11 +189,11 @@ jobs:
         run: |
           {
             echo "event=${GITHUB_EVENT_NAME} chromium_tag=${CHROMIUM_TAG}"
-            grep -h "TAG:\|PATCHES:\|GNARGS:" verify-logs/*.txt 2>/dev/null || echo "(no stage verdicts)"
+            grep -h "TAG:\|PATCHES:\|CPYTHON:\|GNARGS:" verify-logs/*.txt 2>/dev/null || echo "(no stage verdicts)"
             echo "COMPILE: NONE (this job never compiles — compile evidence lives in the build-hop chain only)"
           } | tee verify-logs/99-verdict.txt
           cat verify-logs/99-verdict.txt >> "$GITHUB_STEP_SUMMARY"
-          if [ "${{ steps.fetch.outcome }}" != "success" ] || [ "${{ steps.tag.outcome }}" != "success" ] || [ "${{ steps.patches.outcome }}" != "success" ] || [ "${{ steps.gnargs.outcome }}" != "success" ]; then
+          if [ "${{ steps.fetch.outcome }}" != "success" ] || [ "${{ steps.tag.outcome }}" != "success" ] || [ "${{ steps.patches.outcome }}" != "success" ] || [ "${{ steps.cpython.outcome }}" != "success" ] || [ "${{ steps.gnargs.outcome }}" != "success" ]; then
             echo "VERIFY: FAILED (see stage verdicts above)"
             exit 1
           fi
