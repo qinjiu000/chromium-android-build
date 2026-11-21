@@ -109,6 +109,20 @@ ABI：arm64-v8a（生产）＋ x86_64（仅模拟器 CI 验证）。**
     启动超时放宽到 2400 秒。另已排除 ARM runner 路线：NDK r30 的 Linux
     包只含 `linux-x86_64` 宿主工具链，无 `linux-aarch64`。
 - **第 2 轮**：待跑。
+- **第 2 轮（run 44836441687，2026-11-21，失败）**：
+  - x86_64：单行脚本修复生效，模拟器上实际跑起来了，7 项检查通过 6 项
+    （imports-and-version、zlib、sqlite3、threading、ssl、socket 全 PASS，
+    `sys.path` 与设计一致）。唯一失败是测试本身的错误期望：
+    `pyhello` 已加载且 `add(2,3)==5` 通过，但断言写了
+    `platform() == "linux"`，而 Android 上 `sys.platform` 是 `"android"`。
+    已改为与 `sys.platform` 对比。第 3 轮预期 x86_64 全绿。
+  - arm64：API 30＋4 核＋4GB＋2400 秒启动超时，仍是“Timeout waiting for
+    emulator to boot”，adb 始终看不到设备。两轮、两个 API 级别都一样，
+    结论：x86_64 runner 上 ARM64 模拟器实际起不来。ARM runner 也不行：
+    模拟器 SDK 包只有 x86_64 宿主二进制（repository2-1.xml 核实），
+    NDK r30 也无 linux-aarch64 工具链。第 3 轮起 arm64 只做 CI 交叉编译
+    验证，字面意义上的 arm64 运行证明留待真机（用户手机）。
+- **第 3 轮**：待跑。
 
 ## 6. 结论（待 CI 跑完填写）
 

@@ -64,7 +64,10 @@ def test_pyhello():
     import pyhello
 
     assert pyhello.add(2, 3) == 5
-    assert pyhello.platform() == "linux", pyhello.platform()
+    # CPython 3.13 reports sys.platform == "android" on Android (verified
+    # on the emulator: the first version of this test wrongly expected
+    # "linux"). Compare against sys.platform so the test is portable.
+    assert pyhello.platform() == sys.platform, pyhello.platform()
 
 
 check("imports-and-version", test_imports_and_version)

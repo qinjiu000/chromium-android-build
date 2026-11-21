@@ -46,18 +46,24 @@ jobs:
           arch: x86_64
           script: prototypes/cpython/run_on_emulator.sh x86_64
 
-  proto-arm64:
+  # NOTE: there is deliberately NO arm64 emulator job. Two rounds proved an
+  # arm64-v8a emulator does not boot on x86_64 GitHub runners: API 34
+  # (run 44831624898) and API 30 with 4 cores / 4 GB RAM / 2400 s boot
+  # timeout (run 44836441687) both ended with "Timeout waiting for emulator
+  # to boot" — adb never saw the device. An ARM64 runner is not an escape
+  # hatch either: the Android emulator SDK package ships only x86_64 host
+  # binaries (emulator-linux_x64-*.zip, verified in repository2-1.xml) and
+  # NDK r30 has no linux-aarch64 toolchain. Literal arm64 execution is
+  # therefore deferred to real hardware (the user's phone); what CI proves
+  # for arm64 is that the artifacts build correctly (this job) plus the
+  # local readelf verification recorded in the README.
+  proto-arm64-build:
     runs-on: ubuntu-latest
-    timeout-minutes: 300
+    timeout-minutes: 30
     env:
       TMPDIR: ${{ github.workspace }}/tmp
     steps:
       - uses: actions/checkout@v4
-      - name: Enable KVM
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
       - name: Download NDK r30
         run: |
           mkdir -p "$TMPDIR" "$GITHUB_WORKSPACE/ndk"
@@ -71,17 +77,3 @@ jobs:
           prototypes/cpython/fetch_python.sh
           prototypes/cpython/build.sh "$ANDROID_NDK_HOME" \
             prototypes/cpython/unpacked/arm64-v8a arm64-v8a
-      - name: Run on arm64 Android emulator
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          # API 30: the action's README notes arm64-v8a images work best on
-          # lower API levels (e.g. 30); API 34 arm64 never registered with
-          # adb in 30 minutes (run 44831624898). API 30 >= minSdk 29, so it
-          # is a valid proof target.
-          api-level: 30
-          target: google_apis
-          arch: arm64-v8a
-          cores: 4
-          ram-size: 4096M
-          emulator-boot-timeout: 2400
-          script: prototypes/cpython/run_on_emulator.sh arm64-v8a
