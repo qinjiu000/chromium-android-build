@@ -103,7 +103,10 @@ permissions:
   actions: write
 
 concurrency:
-  group: build-hop
+  # Per-branch group: hops within one chain still serialize, but the
+  # fingerprint-python chain no longer queues behind the degoogle-selective
+  # chain (or vice versa) — the two chains run in parallel on free runners.
+  group: build-hop-${{ github.ref }}
   cancel-in-progress: false
 
 env:
