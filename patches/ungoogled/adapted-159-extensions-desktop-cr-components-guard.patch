@@ -38,6 +38,26 @@ index c0a7ca6..35e6cdf 100644
  import 'chrome://resources/cr_elements/cr_toggle/cr_toggle.js';
  import './item.js';
  import './mv2_deprecation_panel.js';
+diff --git a/chrome/browser/resources/extensions/keyboard_shortcuts.html.ts b/chrome/browser/resources/extensions/keyboard_shortcuts.html.ts
+index aa1cc90..2ab45e1 100644
+--- a/chrome/browser/resources/extensions/keyboard_shortcuts.html.ts
++++ b/chrome/browser/resources/extensions/keyboard_shortcuts.html.ts
+@@ -19,6 +19,7 @@ export function getHtml(this: KeyboardShortcutsElement) {
+         ${item.commands.map(command => html`
+           <div class="command-entry">
+             <span class="command-name">${command.description}</span>
++            <if expr="not is_android and not is_ios or is_desktop_android">
+             <div class="shortcut-input-container">
+               <span class="shortcut-input-label" aria-hidden="true">
+                 $i18n{shortcutInputLabel}
+@@ -36,6 +37,7 @@ export function getHtml(this: KeyboardShortcutsElement) {
+                       this, item.id, command.name)}">
+               </cr-shortcut-input>
+             </div>
++            </if>
+             <div class="shortcut-scope-container">
+               <span class="shortcut-scope-label" aria-hidden="true">
+                 $i18n{shortcutScope}
 diff --git a/chrome/browser/resources/extensions/keyboard_shortcuts.ts b/chrome/browser/resources/extensions/keyboard_shortcuts.ts
 index 16bc3f8..647894c 100644
 --- a/chrome/browser/resources/extensions/keyboard_shortcuts.ts
