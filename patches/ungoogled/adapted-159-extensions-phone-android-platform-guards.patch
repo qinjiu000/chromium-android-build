@@ -1,0 +1,52 @@
+diff --git a/extensions/browser/api/web_request/permission_helper.cc b/extensions/browser/api/web_request/permission_helper.cc
+index 46c329f..5276573 100644
+--- a/extensions/browser/api/web_request/permission_helper.cc
++++ b/extensions/browser/api/web_request/permission_helper.cc
+@@ -6,6 +6,7 @@
+ 
+ #include "base/no_destructor.h"
+ #include "build/android_buildflags.h"
++#include "build/build_config.h"
+ #include "extensions/browser/api/extensions_api_client.h"
+ #include "extensions/browser/extension_prefs_factory.h"
+ #include "extensions/browser/extension_registry.h"
+@@ -64,7 +65,10 @@ void BrowserContextKeyedAPIFactory<
+   // implicitly depends upon those.
+   ExtensionsAPIClient* extensions_api_client = ExtensionsAPIClient::Get();
+ 
+-#if BUILDFLAG(IS_DESKTOP_ANDROID)
++  // Phone Android shares desktop android's startup flow (profile init
++  // happens before BrowserProcess init), so the client may be null here
++  // on phone Android as well.
++#if BUILDFLAG(IS_ANDROID)
+   // TODO(https://crbug.com/356905053): On Android, the startup and
+   // initialization flow is different.
+   // ExtensionsAPIClient is instantiated as part of the ExtensionsBrowserClient,
+diff --git a/extensions/common/command.cc b/extensions/common/command.cc
+index 1768b63..4170205 100644
+--- a/extensions/common/command.cc
++++ b/extensions/common/command.cc
+@@ -122,6 +122,10 @@ std::string Command::CommandPlatform() {
+ #elif BUILDFLAG(IS_DESKTOP_ANDROID)
+   // For now, we use linux keybindings on desktop android.
+   return ui::kKeybindingPlatformLinux;
++#elif BUILDFLAG(IS_ANDROID)
++  // Phone Android has no desktop keybinding platform; like desktop android,
++  // fall back to linux keybindings for extension commands.
++  return ui::kKeybindingPlatformLinux;
+ #else
+ #error Unsupported platform
+ #endif
+diff --git a/extensions/renderer/bindings/api_binding_util.cc b/extensions/renderer/bindings/api_binding_util.cc
+index 8ce0b53..6942012 100644
+--- a/extensions/renderer/bindings/api_binding_util.cc
++++ b/extensions/renderer/bindings/api_binding_util.cc
+@@ -150,6 +150,8 @@ std::string_view GetPlatformString() {
+   return "win";
+ #elif BUILDFLAG(IS_DESKTOP_ANDROID)
+   return "desktop_android";
++#elif BUILDFLAG(IS_ANDROID)
++  return "android";
+ #else
+   NOTREACHED();
+ #endif
