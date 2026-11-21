@@ -6,6 +6,7 @@ adapted-159-block-requests.patch
 adapted-159-extensions-desktop-cr-components-guard.patch
 adapted-159-extensions-ntp-dep-guard.patch
 adapted-159-extensions-phone-android-platform-guards.patch
+adapted-159-extensions-scope-handler-rename.patch
 adapted-159-extensions-search-test-support-guard.patch
 adapted-159-media-router-discovery-guard.patch
 adapted-159-safe_browsing-disable-incident-reporting.patch

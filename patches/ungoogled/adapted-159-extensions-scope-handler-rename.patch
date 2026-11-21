@@ -1,0 +1,26 @@
+diff --git a/chrome/browser/resources/extensions/keyboard_shortcuts.html.ts b/chrome/browser/resources/extensions/keyboard_shortcuts.html.ts
+index 2ab45e1..439bada 100644
+--- a/chrome/browser/resources/extensions/keyboard_shortcuts.html.ts
++++ b/chrome/browser/resources/extensions/keyboard_shortcuts.html.ts
+@@ -42,7 +42,7 @@ export function getHtml(this: KeyboardShortcutsElement) {
+               <span class="shortcut-scope-label" aria-hidden="true">
+                 $i18n{shortcutScope}
+               </span>
+-              <select class="md-select" @change="${this.onScopeChanged_}"
++              <select class="md-select" @change="${this.onScopeChange_}"
+                   data-extension-id="${item.id}"
+                   data-command-name="${command.name}"
+                   aria-label="${this.computeScopeAriaLabel_(item, command)}"
+diff --git a/chrome/browser/resources/extensions/keyboard_shortcuts.ts b/chrome/browser/resources/extensions/keyboard_shortcuts.ts
+index 647894c..b4c3c91 100644
+--- a/chrome/browser/resources/extensions/keyboard_shortcuts.ts
++++ b/chrome/browser/resources/extensions/keyboard_shortcuts.ts
+@@ -84,7 +84,7 @@ export class ExtensionsKeyboardShortcutsElement extends
+     return command.isExtensionAction || !command.isActive;
+   }
+ 
+-  protected onScopeChanged_(event: Event) {
++  protected onScopeChange_(event: Event) {
+     const target = event.target as HTMLSelectElement;
+     const extensionId = target.dataset['extensionId']!;
+     const commandName = target.dataset['commandName']!;
