@@ -11,10 +11,18 @@ index 09cdd1e..9060732 100644
    "java/src/org/chromium/chrome/browser/crash/ChromeMinidumpUploadJobServiceImpl.java",
    "java/src/org/chromium/chrome/browser/crash/ChromeMinidumpUploaderDelegate.java",
 diff --git a/chrome/android/cpython/python_bridge.cc b/chrome/android/cpython/python_bridge.cc
-index 90e2008..b6765d2 100644
+index 90e2008..3eb8a3a 100644
 --- a/chrome/android/cpython/python_bridge.cc
 +++ b/chrome/android/cpython/python_bridge.cc
-@@ -26,6 +26,14 @@ std::atomic<bool> g_initialized(false);
+@@ -13,6 +13,7 @@
+ #include "base/android/jni_string.h"
+ #include "base/android/scoped_java_ref.h"
+ #include "base/logging.h"
++#include "base/memory/raw_ptr.h"
+ #include "chrome/android/cpython/jni_headers/PythonBridge_jni.h"
+ #include "chrome/android/cpython/python_bridge.h"
+ #include "third_party/jni_zero/jni_zero.h"
+@@ -26,6 +27,14 @@ std::atomic<bool> g_initialized(false);
  // Retained for the process lifetime: PyEval_SaveThread() hands the GIL back
  // after init so later calls can re-acquire it via PyGILState_Ensure().
  PyThreadState* g_saved_thread_state = nullptr;
@@ -29,7 +37,7 @@ index 90e2008..b6765d2 100644
  
  bool AppendModuleSearchPath(PyConfig* config, const std::string& path) {
    wchar_t* wide_path = Py_DecodeLocale(path.c_str(), nullptr);
-@@ -115,12 +123,330 @@ void RestoreRedirect(PyObject* sys_module,
+@@ -115,12 +124,331 @@ void RestoreRedirect(PyObject* sys_module,
    PyErr_Clear();
  }
  
@@ -40,17 +48,18 @@ index 90e2008..b6765d2 100644
 +      return;
 +    }
 +
-+    jint result = g_jvm->GetEnv(reinterpret_cast<void**>(&env_), JNI_VERSION_1_6);
++    JNIEnv* env = nullptr;
++    jint result = g_jvm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6);
 +    if (result == JNI_EDETACHED) {
-+      if (g_jvm->AttachCurrentThread(reinterpret_cast<void**>(&env_), nullptr) ==
-+          JNI_OK) {
++      if (g_jvm->AttachCurrentThread(&env, nullptr) == JNI_OK) {
 +        attached_ = true;
 +      } else {
-+        env_ = nullptr;
++        env = nullptr;
 +      }
 +    } else if (result != JNI_OK) {
-+      env_ = nullptr;
++      env = nullptr;
 +    }
++    env_ = env;
 +  }
 +
 +  ~ScopedJNIEnv() {
@@ -59,10 +68,10 @@ index 90e2008..b6765d2 100644
 +    }
 +  }
 +
-+  JNIEnv* get() const { return env_; }
++  JNIEnv* get() const { return env_.get(); }
 +
 + private:
-+  JNIEnv* env_ = nullptr;
++  raw_ptr<JNIEnv> env_ = nullptr;
 +  bool attached_ = false;
 +};
 +
@@ -360,7 +369,7 @@ index 90e2008..b6765d2 100644
      mkdir(cache_dir.c_str(), 0700);
  
      PyConfig config;
-@@ -282,6 +608,9 @@ static bool JNI_PythonBridge_NativeInitialize(
+@@ -282,6 +610,9 @@ static bool JNI_PythonBridge_NativeInitialize(
      const base::android::JavaRef<jstring>& stdlib_dir,
      const base::android::JavaRef<jstring>& native_lib_dir,
      const base::android::JavaRef<jstring>& cache_dir) {
