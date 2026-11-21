@@ -37,7 +37,10 @@ permissions:
   contents: read
 
 concurrency:
-  group: verify
+  # Per-branch group: the two chains verify in parallel now; within one
+  # branch the latest commit still wins. (Repo-wide group used to cancel
+  # a verify on one branch when the other branch dispatched.)
+  group: verify-${{ github.ref }}
   cancel-in-progress: true   # cheap job — latest commit wins
 
 env:
