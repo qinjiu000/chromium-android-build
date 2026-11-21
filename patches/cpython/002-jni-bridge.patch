@@ -1,0 +1,589 @@
+diff --git a/chrome/BUILD.gn b/chrome/BUILD.gn
+index e7bfa73..732a20b 100644
+--- a/chrome/BUILD.gn
++++ b/chrome/BUILD.gn
+@@ -1825,6 +1825,7 @@ if (is_android) {
+ 
+     deps = [
+       ":dependencies",
++      "//chrome/android/cpython:python_bridge",
+       "//chrome/app:chrome_crash_reporter_client",
+       "//chrome/browser:chrome_content_browser_client",
+       "//chrome/browser:defaults",
+diff --git a/chrome/android/BUILD.gn b/chrome/android/BUILD.gn
+index 248d242..1b600a1 100644
+--- a/chrome/android/BUILD.gn
++++ b/chrome/android/BUILD.gn
+@@ -3023,6 +3023,7 @@ if (_is_default_toolchain) {
+   group("jni_headers") {
+     public_deps = [
+       ":chrome_jni_headers",
++      "//chrome/android/cpython:jni_headers",
+       "//chrome/android/features/keyboard_accessory:jni_headers",
+       "//chrome/browser/android/browserservices/metrics:jni_headers($default_toolchain)",
+       "//chrome/browser/android/browserservices/verification:jni_headers",
+diff --git a/chrome/android/chrome_java_sources.gni b/chrome/android/chrome_java_sources.gni
+index d93b36d..9ab16ba 100644
+--- a/chrome/android/chrome_java_sources.gni
++++ b/chrome/android/chrome_java_sources.gni
+@@ -491,6 +491,7 @@ chrome_java_sources = [
+   "java/src/org/chromium/chrome/browser/contextualsearch/SelectionClientManager.java",
+   "java/src/org/chromium/chrome/browser/contextualsearch/TapFarFromPreviousSuppression.java",
+   "java/src/org/chromium/chrome/browser/contextualsearch/TapSuppressionHeuristics.java",
++  "java/src/org/chromium/chrome/browser/cpython/PythonBridge.java",
+   "java/src/org/chromium/chrome/browser/crash/ChromeMinidumpUploadJobServiceImpl.java",
+   "java/src/org/chromium/chrome/browser/crash/ChromeMinidumpUploaderDelegate.java",
+   "java/src/org/chromium/chrome/browser/crash/ChromePureJavaExceptionReporter.java",
+diff --git a/chrome/android/cpython/BUILD.gn b/chrome/android/cpython/BUILD.gn
+index 3f16623..a15e29b 100644
+--- a/chrome/android/cpython/BUILD.gn
++++ b/chrome/android/cpython/BUILD.gn
+@@ -2,17 +2,34 @@
+ # Use of this source code is governed by a BSD-style license that can be
+ # found in the LICENSE file.
+ 
+-# Native CPython embedding (phase 3). Stage A: package the prebuilt
+-# interpreter libraries (via loadable_modules on chrome_public_apk, see
+-# python_native_libs.gni) and the stdlib zip as an APK asset. The JNI
+-# bridge (stage B) adds the targets that link against libpython here.
+-
+ import("//build/config/android/rules.gni")
++import("//third_party/jni_zero/jni_zero.gni")
+ import("python_native_libs.gni")
+ 
+-# Stdlib zip, extracted once at first Python init (see PythonBridge).
+ android_assets("python_stdlib_assets") {
+   renaming_sources = [ python_stdlib_zip ]
+   renaming_destinations = [ "python_stdlib.zip" ]
+   disable_compression = true
+ }
++
++generate_jni("jni_headers") {
++  sources = [
++    "../java/src/org/chromium/chrome/browser/cpython/PythonBridge.java",
++  ]
++}
++
++source_set("python_bridge") {
++  sources = [
++    "python_bridge.cc",
++    "python_bridge.h",
++  ]
++
++  include_dirs = [ python_include_dir ]
++  libs = [ "python3.13" ]
++  lib_dirs = [ python_lib_dir ]
++
++  deps = [
++    ":jni_headers",
++    "//base",
++  ]
++}
+diff --git a/chrome/android/cpython/python_bridge.cc b/chrome/android/cpython/python_bridge.cc
+new file mode 100644
+index 0000000..90e2008
+--- /dev/null
++++ b/chrome/android/cpython/python_bridge.cc
+@@ -0,0 +1,303 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#define PY_SSIZE_T_CLEAN
++#include <Python.h>
++
++#include <atomic>
++#include <mutex>
++#include <string>
++#include <sys/stat.h>
++
++#include "base/android/jni_string.h"
++#include "base/android/scoped_java_ref.h"
++#include "base/logging.h"
++#include "chrome/android/cpython/jni_headers/PythonBridge_jni.h"
++#include "chrome/android/cpython/python_bridge.h"
++#include "third_party/jni_zero/jni_zero.h"
++
++namespace cpython {
++
++namespace {
++
++std::once_flag g_initialize_once;
++std::atomic<bool> g_initialized(false);
++// Retained for the process lifetime: PyEval_SaveThread() hands the GIL back
++// after init so later calls can re-acquire it via PyGILState_Ensure().
++PyThreadState* g_saved_thread_state = nullptr;
++
++bool AppendModuleSearchPath(PyConfig* config, const std::string& path) {
++  wchar_t* wide_path = Py_DecodeLocale(path.c_str(), nullptr);
++  if (!wide_path) {
++    return false;
++  }
++  PyStatus status =
++      PyWideStringList_Append(&config->module_search_paths, wide_path);
++  PyMem_RawFree(wide_path);
++  if (PyStatus_Exception(status)) {
++    return false;
++  }
++  return true;
++}
++
++std::string FormatPythonException() {
++  PyObject* exc_type = nullptr;
++  PyObject* exc_value = nullptr;
++  PyObject* exc_traceback = nullptr;
++  PyErr_Fetch(&exc_type, &exc_value, &exc_traceback);
++  PyErr_NormalizeException(&exc_type, &exc_value, &exc_traceback);
++
++  std::string formatted;
++  PyObject* traceback_module = PyImport_ImportModule("traceback");
++  if (traceback_module) {
++    PyObject* format_exception =
++        PyObject_GetAttrString(traceback_module, "format_exception");
++    if (format_exception) {
++      PyObject* formatted_lines = nullptr;
++      if (exc_value) {
++        formatted_lines = PyObject_CallOneArg(format_exception, exc_value);
++      } else if (exc_type) {
++        formatted_lines = PyObject_CallOneArg(format_exception, exc_type);
++      }
++      if (formatted_lines) {
++        PyObject* lines =
++            PySequence_Fast(formatted_lines, "traceback lines");
++        if (lines) {
++          Py_ssize_t length = PySequence_Fast_GET_SIZE(lines);
++          for (Py_ssize_t i = 0; i < length; ++i) {
++            PyObject* line = PySequence_Fast_GET_ITEM(lines, i);
++            const char* utf8 = PyUnicode_AsUTF8(line);
++            if (utf8) {
++              formatted.append(utf8);
++            }
++          }
++          Py_DECREF(lines);
++        }
++        Py_XDECREF(formatted_lines);
++      }
++      Py_XDECREF(format_exception);
++    }
++    Py_DECREF(traceback_module);
++  }
++
++  if (formatted.empty()) {
++    formatted = "Traceback (most recent call last):\n";
++    if (exc_value) {
++      PyObject* text = PyObject_Str(exc_value);
++      if (text) {
++        const char* utf8 = PyUnicode_AsUTF8(text);
++        if (utf8) {
++          formatted.append(utf8);
++          formatted.push_back('\n');
++        }
++        Py_DECREF(text);
++      }
++    }
++  }
++
++  Py_XDECREF(exc_type);
++  Py_XDECREF(exc_value);
++  Py_XDECREF(exc_traceback);
++  PyErr_Clear();
++  return formatted;
++}
++
++void RestoreRedirect(PyObject* sys_module,
++                     PyObject* original_stdout,
++                     PyObject* original_stderr) {
++  if (original_stdout) {
++    PyObject_SetAttrString(sys_module, "stdout", original_stdout);
++  }
++  if (original_stderr) {
++    PyObject_SetAttrString(sys_module, "stderr", original_stderr);
++  }
++  PyErr_Clear();
++}
++
++}  // namespace
++
++bool Initialize(const std::string& stdlib_dir,
++                const std::string& native_lib_dir,
++                const std::string& cache_dir) {
++  std::call_once(g_initialize_once, [&]() {
++    mkdir(cache_dir.c_str(), 0700);
++
++    PyConfig config;
++    PyConfig_InitIsolatedConfig(&config);
++
++    PyStatus status =
++        PyConfig_SetBytesString(&config, &config.program_name, "chrome");
++    if (!PyStatus_Exception(status)) {
++      status =
++          PyConfig_SetBytesString(&config, &config.base_executable, "chrome");
++    }
++    if (!PyStatus_Exception(status)) {
++      status =
++          PyConfig_SetBytesString(&config, &config.pycache_prefix,
++                                  cache_dir.c_str());
++    }
++    if (PyStatus_Exception(status)) {
++      PyConfig_Clear(&config);
++      return;
++    }
++
++    config.module_search_paths_set = 1;
++    if (!AppendModuleSearchPath(&config, stdlib_dir) ||
++        !AppendModuleSearchPath(&config, native_lib_dir)) {
++      PyConfig_Clear(&config);
++      return;
++    }
++
++    status = Py_InitializeFromConfig(&config);
++    PyConfig_Clear(&config);
++    if (PyStatus_Exception(status)) {
++      return;
++    }
++
++    g_saved_thread_state = PyEval_SaveThread();
++    g_initialized.store(true);
++    LOG(INFO) << "CPython 3.13.16 initialized";
++  });
++  return g_initialized.load();
++}
++
++bool IsInitialized() {
++  return g_initialized.load();
++}
++
++std::string Eval(const std::string& code) {
++  if (!g_initialized.load()) {
++    return "CPython is not initialized";
++  }
++
++  PyGILState_STATE gil_state = PyGILState_Ensure();
++
++  PyObject* sys_module = PyImport_AddModule("sys");
++  PyObject* original_stdout =
++      sys_module ? PyObject_GetAttrString(sys_module, "stdout") : nullptr;
++  PyObject* original_stderr =
++      sys_module ? PyObject_GetAttrString(sys_module, "stderr") : nullptr;
++
++  PyObject* io_module = PyImport_ImportModule("io");
++  PyObject* string_io_class =
++      io_module ? PyObject_GetAttrString(io_module, "StringIO") : nullptr;
++  PyObject* string_io =
++      string_io_class ? PyObject_CallNoArgs(string_io_class) : nullptr;
++  PyObject* main_module = PyImport_AddModule("__main__");
++  PyObject* globals =
++      main_module ? PyModule_GetDict(main_module) : nullptr;
++
++  if (!sys_module || !original_stdout || !original_stderr || !io_module ||
++      !string_io_class || !string_io || !globals) {
++    std::string result = FormatPythonException();
++    if (sys_module && original_stdout) {
++      PyObject_SetAttrString(sys_module, "stdout", original_stdout);
++    }
++    if (sys_module && original_stderr) {
++      PyObject_SetAttrString(sys_module, "stderr", original_stderr);
++    }
++    PyErr_Clear();
++    Py_XDECREF(string_io);
++    Py_XDECREF(string_io_class);
++    Py_XDECREF(io_module);
++    Py_XDECREF(original_stderr);
++    Py_XDECREF(original_stdout);
++    PyGILState_Release(gil_state);
++    return result;
++  }
++
++  PyObject_SetAttrString(sys_module, "stdout", string_io);
++  PyObject_SetAttrString(sys_module, "stderr", string_io);
++  if (PyErr_Occurred()) {
++    std::string result = FormatPythonException();
++    RestoreRedirect(sys_module, original_stdout, original_stderr);
++    Py_XDECREF(string_io);
++    Py_XDECREF(string_io_class);
++    Py_XDECREF(io_module);
++    Py_XDECREF(original_stderr);
++    Py_XDECREF(original_stdout);
++    PyGILState_Release(gil_state);
++    return result;
++  }
++
++  PyObject* compiled =
++      Py_CompileString(code.c_str(), "<console>", Py_file_input);
++  if (!compiled) {
++    std::string result = FormatPythonException();
++    RestoreRedirect(sys_module, original_stdout, original_stderr);
++    Py_XDECREF(string_io);
++    Py_XDECREF(string_io_class);
++    Py_XDECREF(io_module);
++    Py_XDECREF(original_stderr);
++    Py_XDECREF(original_stdout);
++    PyGILState_Release(gil_state);
++    return result;
++  }
++
++  PyObject* evaluated =
++      PyEval_EvalCode(compiled, globals, globals);
++  Py_DECREF(compiled);
++  if (!evaluated) {
++    std::string result = FormatPythonException();
++    RestoreRedirect(sys_module, original_stdout, original_stderr);
++    Py_XDECREF(string_io);
++    Py_XDECREF(string_io_class);
++    Py_XDECREF(io_module);
++    Py_XDECREF(original_stderr);
++    Py_XDECREF(original_stdout);
++    PyGILState_Release(gil_state);
++    return result;
++  }
++  Py_DECREF(evaluated);
++
++  std::string result;
++  // NB: PyObject_CallMethodNoArgs takes a PyObject* name; the const-char*
++  // form is PyObject_CallMethod with a NULL format (no args).
++  PyObject* getvalue = PyObject_CallMethod(string_io, "getvalue", nullptr);
++  if (!getvalue) {
++    result = FormatPythonException();
++  } else {
++    const char* utf8 = PyUnicode_AsUTF8(getvalue);
++    if (utf8) {
++      result = utf8;
++    } else {
++      result = FormatPythonException();
++    }
++    Py_DECREF(getvalue);
++  }
++
++  RestoreRedirect(sys_module, original_stdout, original_stderr);
++  Py_XDECREF(string_io);
++  Py_XDECREF(string_io_class);
++  Py_XDECREF(io_module);
++  Py_XDECREF(original_stderr);
++  Py_XDECREF(original_stdout);
++  PyGILState_Release(gil_state);
++  return result;
++}
++
++static bool JNI_PythonBridge_NativeInitialize(
++    JNIEnv* env,
++    const base::android::JavaRef<jstring>& stdlib_dir,
++    const base::android::JavaRef<jstring>& native_lib_dir,
++    const base::android::JavaRef<jstring>& cache_dir) {
++  std::string stdlib = base::android::ConvertJavaStringToUTF8(env, stdlib_dir);
++  std::string native_lib =
++      base::android::ConvertJavaStringToUTF8(env, native_lib_dir);
++  std::string cache =
++      base::android::ConvertJavaStringToUTF8(env, cache_dir);
++  return Initialize(stdlib, native_lib, cache);
++}
++
++static base::android::ScopedJavaLocalRef<jstring>
++JNI_PythonBridge_NativeEval(
++    JNIEnv* env,
++    const base::android::JavaRef<jstring>& code) {
++  std::string source = base::android::ConvertJavaStringToUTF8(env, code);
++  return base::android::ConvertUTF8ToJavaString(env, Eval(source));
++}
++
++}  // namespace cpython
++
++DEFINE_JNI(PythonBridge)
+diff --git a/chrome/android/cpython/python_bridge.h b/chrome/android/cpython/python_bridge.h
+new file mode 100644
+index 0000000..0a5555f
+--- /dev/null
++++ b/chrome/android/cpython/python_bridge.h
+@@ -0,0 +1,20 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_ANDROID_CPYTHON_PYTHON_BRIDGE_H_
++#define CHROME_ANDROID_CPYTHON_PYTHON_BRIDGE_H_
++
++#include <string>
++
++namespace cpython {
++
++bool Initialize(const std::string& stdlib_dir,
++                const std::string& native_lib_dir,
++                const std::string& cache_dir);
++bool IsInitialized();
++std::string Eval(const std::string& code);
++
++}  // namespace cpython
++
++#endif  // CHROME_ANDROID_CPYTHON_PYTHON_BRIDGE_H_
+diff --git a/chrome/android/java/src/org/chromium/chrome/browser/cpython/PythonBridge.java b/chrome/android/java/src/org/chromium/chrome/browser/cpython/PythonBridge.java
+new file mode 100644
+index 0000000..83d90d0
+--- /dev/null
++++ b/chrome/android/java/src/org/chromium/chrome/browser/cpython/PythonBridge.java
+@@ -0,0 +1,167 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++package org.chromium.chrome.browser.cpython;
++
++import android.content.Context;
++
++import org.jni_zero.JNINamespace;
++import org.jni_zero.NativeMethods;
++
++import org.chromium.build.annotations.NullMarked;
++
++import java.io.File;
++import java.io.FileOutputStream;
++import java.io.IOException;
++import java.io.InputStream;
++import java.io.OutputStream;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.util.zip.ZipEntry;
++import java.util.zip.ZipInputStream;
++
++@JNINamespace("cpython")
++@NullMarked
++public final class PythonBridge {
++    private static final String PYTHON_DIRECTORY = "python";
++    private static final String STDLIB_DIRECTORY = "stdlib";
++    private static final String PYCACHE_DIRECTORY = "pycache";
++    private static final String MARKER_FILE = ".stdlib-version";
++    private static final String MARKER_VERSION = "3.13.16-0";
++
++    private static volatile boolean sInitialized;
++
++    private PythonBridge() {}
++
++    /**
++     * Initializes CPython. Call from any background thread, exactly once for the process.
++     *
++     * @param context Android context used to locate application files and native libraries.
++     */
++    public static void initialize(Context context) {
++        synchronized (PythonBridge.class) {
++            if (sInitialized) {
++                return;
++            }
++
++            File pythonDir = new File(context.getFilesDir(), PYTHON_DIRECTORY);
++            File stdlibDir = new File(pythonDir, STDLIB_DIRECTORY);
++            File cacheDir = new File(pythonDir, PYCACHE_DIRECTORY);
++            File marker = new File(pythonDir, MARKER_FILE);
++
++            try {
++                if (!marker.exists()
++                        || !new String(
++                                        Files.readAllBytes(marker.toPath()),
++                                        StandardCharsets.UTF_8)
++                                .trim()
++                                .equals(MARKER_VERSION)) {
++                    extractStdlib(context, stdlibDir);
++                    if (!pythonDir.isDirectory() && !pythonDir.mkdirs()) {
++                        throw new IOException("Unable to create Python directory");
++                    }
++                    try (OutputStream output =
++                            new FileOutputStream(marker)) {
++                        output.write(MARKER_VERSION.getBytes(StandardCharsets.UTF_8));
++                    }
++                }
++                if (!cacheDir.isDirectory() && !cacheDir.mkdirs()) {
++                    throw new IOException("Unable to create Python cache directory");
++                }
++            } catch (IOException | RuntimeException exception) {
++                throw new IllegalStateException(
++                        "Unable to prepare CPython files", exception);
++            }
++
++            if (!PythonBridgeJni.get()
++                    .nativeInitialize(
++                            stdlibDir.getAbsolutePath(),
++                            context.getApplicationInfo().nativeLibraryDir,
++                            cacheDir.getAbsolutePath())) {
++                throw new IllegalStateException("Unable to initialize CPython");
++            }
++            sInitialized = true;
++        }
++    }
++
++    /**
++     * Evaluates Python code. Call only from the single Python executor thread.
++     *
++     * @param code Python source to compile and execute.
++     * @return Captured stdout/stderr text, or formatted traceback text on error.
++     */
++    public static String eval(String code) {
++        if (!sInitialized) {
++            throw new IllegalStateException("CPython is not initialized");
++        }
++        return PythonBridgeJni.get().nativeEval(code);
++    }
++
++    /** Returns whether this Java process has initialized CPython. */
++    public static boolean isInitialized() {
++        return sInitialized;
++    }
++
++    private static void extractStdlib(Context context, File stdlibDir)
++            throws IOException {
++        if (!stdlibDir.isDirectory() && !stdlibDir.mkdirs()) {
++            throw new IOException("Unable to create Python stdlib directory");
++        }
++
++        File canonicalRoot = stdlibDir.getCanonicalFile();
++        String rootPath = canonicalRoot.getPath();
++        byte[] buffer = new byte[8192];
++
++        try (InputStream asset =
++                        context.getAssets().open("python_stdlib.zip");
++                ZipInputStream zip = new ZipInputStream(asset)) {
++            ZipEntry entry;
++            while ((entry = zip.getNextEntry()) != null) {
++                String entryName = entry.getName();
++                if (entryName.startsWith("/")
++                        || entryName.contains("\\")
++                        || entryName.contains("../")
++                        || entryName.contains("..\\")) {
++                    throw new IOException("Invalid stdlib zip entry: " + entryName);
++                }
++
++                File output = new File(canonicalRoot, entryName).getCanonicalFile();
++                if (!output.getPath().equals(rootPath)
++                        && !output.getPath().startsWith(rootPath + File.separator)) {
++                    throw new IOException("Zip-slip stdlib entry: " + entryName);
++                }
++
++                if (entry.isDirectory()) {
++                    if (!output.isDirectory() && !output.mkdirs()) {
++                        throw new IOException(
++                                "Unable to create stdlib directory: " + output);
++                    }
++                } else {
++                    File parent = output.getParentFile();
++                    if (parent != null
++                            && !parent.isDirectory()
++                            && !parent.mkdirs()) {
++                        throw new IOException(
++                                "Unable to create stdlib parent: " + parent);
++                    }
++                    try (OutputStream outputStream = new FileOutputStream(output)) {
++                        int read;
++                        while ((read = zip.read(buffer)) != -1) {
++                            outputStream.write(buffer, 0, read);
++                        }
++                    }
++                }
++                zip.closeEntry();
++            }
++        }
++    }
++
++    @NativeMethods
++    interface Natives {
++        boolean nativeInitialize(
++                String stdlibDir, String nativeLibDir, String cacheDir);
++
++        String nativeEval(String code);
++    }
++}
