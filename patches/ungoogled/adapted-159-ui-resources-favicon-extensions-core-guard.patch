@@ -1,0 +1,37 @@
+diff --git a/ui/resources/BUILD.gn b/ui/resources/BUILD.gn
+index 655428d..fe0e445 100644
+--- a/ui/resources/BUILD.gn
++++ b/ui/resources/BUILD.gn
+@@ -2,6 +2,7 @@
+ # Use of this source code is governed by a BSD-style license that can be
+ # found in the LICENSE file.
+ 
++import("//extensions/buildflags/buildflags.gni")
+ import("//tools/grit/grit_rule.gni")
+ import("//tools/grit/repack.gni")
+ import("//ui/webui/webui_features.gni")
+@@ -16,7 +17,10 @@ group("resources") {
+ 
+ grit("ui_resources_grd") {
+   source = "ui_resources.grd"
+-  defines = [ "enable_webui_ntp=$enable_webui_ntp" ]
++  defines = [
++    "enable_webui_ntp=$enable_webui_ntp",
++    "enable_extensions_core=$enable_extensions_core",
++  ]
+   outputs = [
+     "grit/ui_resources.h",
+     "grit/ui_resources_map.cc",
+diff --git a/ui/resources/ui_resources.grd b/ui/resources/ui_resources.grd
+index 120ebdc..8e7ed9b 100644
+--- a/ui/resources/ui_resources.grd
++++ b/ui/resources/ui_resources.grd
+@@ -28,7 +28,7 @@
+       </if>
+       <structure type="chrome_scaled_image" name="IDR_DEFAULT_FAVICON" file="common/default_favicon.png" />
+       <structure type="chrome_scaled_image" name="IDR_DEFAULT_FAVICON_DARK" file="common/default_favicon_dark.png" />
+-      <if expr="not is_android or is_desktop_android or enable_webui_ntp">
++      <if expr="not is_android or is_desktop_android or enable_webui_ntp or enable_extensions_core">
+         <structure type="chrome_scaled_image" name="IDR_DEFAULT_FAVICON_32" file="common/default_favicon_32.png" />
+         <structure type="chrome_scaled_image" name="IDR_DEFAULT_FAVICON_DARK_32" file="common/default_favicon_dark_32.png" />
+         <structure type="chrome_scaled_image" name="IDR_DEFAULT_FAVICON_64" file="common/default_favicon_64.png" />

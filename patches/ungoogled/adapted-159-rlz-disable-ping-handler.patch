@@ -1,0 +1,92 @@
+diff --git a/chrome/browser/android/rlz/rlz_ping_handler.cc b/chrome/browser/android/rlz/rlz_ping_handler.cc
+index d00cead..fbd6f8f 100644
+--- a/chrome/browser/android/rlz/rlz_ping_handler.cc
++++ b/chrome/browser/android/rlz/rlz_ping_handler.cc
+@@ -31,8 +31,6 @@
+ // Must come after all headers that specialize FromJniType() / ToJniType().
+ #include "chrome/android/chrome_jni_headers/RlzPingHandler_jni.h"
+ 
+-constexpr int kMaxRetries = 10;
+-
+ namespace {
+ const char kProtocolCgiVariable[] = "rep";
+ }
+@@ -53,74 +51,11 @@ void RlzPingHandler::Ping(const std::string& brand,
+                           const std::string& events,
+                           const std::string& id,
+                           base::OnceCallback<void(bool)> callback) {
+-  if (brand.empty() || language.empty() || events.empty() || id.empty() ||
+-      !callback) {
+-    if (callback) {
+-      std::move(callback).Run(false);
+-    }
+-    delete this;
+-    return;
++  // RLZ is disabled in this build: never send a ping, report failure.
++  if (callback) {
++    std::move(callback).Run(false);
+   }
+-
+-  callback_ = std::move(callback);
+-
+-  // TODO(crbug.com/574664421): CHECK-exclusion: Convert to a CHECK once we are
+-  // confident it won't be triggered.
+-  DCHECK_EQ(brand.length(), 4u);
+-  DCHECK_EQ(language.length(), 2u);
+-  DCHECK_EQ(id.length(), 50u);
+-
+-  GURL request_url(base::StringPrintf(
+-      "https://%s%s?", rlz_lib::kFinancialServer, rlz_lib::kFinancialPingPath));
+-  request_url = net::AppendQueryParameter(
+-      request_url, rlz_lib::kProductSignatureCgiVariable, "chrome");
+-  request_url =
+-      net::AppendQueryParameter(request_url, kProtocolCgiVariable, "1");
+-  request_url = net::AppendQueryParameter(
+-      request_url, rlz_lib::kProductBrandCgiVariable, brand);
+-  request_url = net::AppendQueryParameter(
+-      request_url, rlz_lib::kProductLanguageCgiVariable, language);
+-  request_url = net::AppendQueryParameter(request_url,
+-                                          rlz_lib::kEventsCgiVariable, events);
+-  request_url = net::AppendQueryParameter(request_url,
+-                                          rlz_lib::kMachineIdCgiVariable, id);
+-
+-  net::NetworkTrafficAnnotationTag traffic_annotation =
+-      net::DefineNetworkTrafficAnnotation("rlz", R"(
+-          semantics {
+-            sender: "RLZ Ping Handler"
+-            description:
+-            "Sends rlz pings for revenue related tracking to the designated web"
+-            "end point."
+-            trigger:
+-            "Critical signals like first install, a promotion dialog being"
+-            "shown, a user selection for a promotion may trigger a ping"
+-            data: "TODO(crbug.com/40190832): Add this field."
+-            destination: WEBSITE
+-          }
+-          policy {
+-            cookies_allowed: NO
+-            setting: "Not user controlled. But it uses a trusted web end point"
+-                     "that doesn't use user data"
+-            policy_exception_justification:
+-              "Not implemented, considered not useful as no content is being "
+-              "uploaded."
+-          })");
+-
+-  auto resource_request = std::make_unique<network::ResourceRequest>();
+-  resource_request->url = request_url;
+-  resource_request->load_flags = net::LOAD_DISABLE_CACHE;
+-  resource_request->credentials_mode = network::mojom::CredentialsMode::kOmit;
+-
+-  simple_url_loader_ = network::SimpleURLLoader::Create(
+-      std::move(resource_request), traffic_annotation);
+-  simple_url_loader_->SetRetryOptions(
+-      kMaxRetries, network::SimpleURLLoader::RETRY_ON_5XX |
+-                       network::SimpleURLLoader::RETRY_ON_NETWORK_CHANGE);
+-  simple_url_loader_->DownloadToStringOfUnboundedSizeUntilCrashAndDie(
+-      url_loader_factory_.get(),
+-      base::BindOnce(&RlzPingHandler::OnSimpleLoaderComplete,
+-                     base::Unretained(this)));
++  delete this;
+ }
+ 
+ void RlzPingHandler::OnSimpleLoaderComplete(
