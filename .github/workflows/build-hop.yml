@@ -274,9 +274,11 @@ jobs:
               -exec touch -h -c -d '2020-01-01 00:00:00 UTC' {} +
             echo "normalized: all tree mtimes -> 2020-01-01 (out/ excluded)"
             echo "--- sanity: sources must all be <= 2020-01-01 ---"
-            find chromium -path 'chromium/src/out' -prune -o -newermt '2020-01-02' -print | head -5
+            find chromium -path 'chromium/src/out' -prune -o -newermt '2020-01-02' -print -quit
             echo "--- sanity: out artifacts (sample) are newer ---"
-            find chromium/src/out/${{ inputs.build-type }} -type f -newermt '2020-01-02' 2>/dev/null | head -3
+            if [ -d "chromium/src/out/${{ inputs.build-type }}" ]; then
+              find chromium/src/out/${{ inputs.build-type }} -type f -newermt '2020-01-02' -print -quit
+            fi
           } 2>&1 | tee hop-logs/26-normalize.log
 
       # ---- the build (plain ninja; resumes transferred out/ state) ---------
