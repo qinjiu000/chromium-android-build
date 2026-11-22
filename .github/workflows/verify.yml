@@ -6,12 +6,12 @@ name: Verify (no compile)
 # Adapted from iNWEB-Browser's b001-verify.yml (separation of concerns).
 #
 #   fetch pinned tree (~10-15 min) -> tag verify -> patch apply/verify
-#   -> gn gen both args files (development + release, gen only, no compile)
+#   -> gn gen all three args files (development + release + official, gen only, no compile)
 #   -> extensions TypeScript lint (preprocess + eslint only, no C++ compile)
 #
 # Total ~40-70 min, no APK, no C++ compile; the out/verify-* dirs are
 # throwaway gen output, discarded with the runner. Its PASS says the
-# chain's inputs are sound — including that both GN args files are accepted
+# chain's inputs are sound — including that all three GN args files are accepted
 # by the pinned tree's gn and that the extensions WebUI lint passes; it
 # says nothing about the C++ compile itself — the build-hop chain remains
 # the only evidence source for that.
@@ -182,7 +182,7 @@ jobs:
           {
             export PATH="$PWD/chromium/depot_tools:$PATH"
             cd chromium/src
-            for BT in development release; do
+            for BT in development release official; do
               echo "--- gn gen out/verify-$BT (args-$BT.gn) ---"
               gn gen "out/verify-$BT" --args="$(cat "$GITHUB_WORKSPACE/config/chromium/args-$BT.gn")"
               echo "gn gen $BT: OK"

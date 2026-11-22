@@ -22,12 +22,13 @@ ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Build variant, from the workflow (CAB_BUILD_TYPE env). development is the
 # default so a bare local run behaves exactly as before this variable
-# existed. release uses args-release.gn and out/release.
+# existed. release uses args-release.gn and out/release; official uses
+# args-official.gn and out/official.
 CAB_BUILD_TYPE="${CAB_BUILD_TYPE:-development}"
 case "$CAB_BUILD_TYPE" in
-  development|release) ;;
+  development|release|official) ;;
   *)
-    echo "ERROR: unknown CAB_BUILD_TYPE '$CAB_BUILD_TYPE' (want development or release)" >&2
+    echo "ERROR: unknown CAB_BUILD_TYPE '$CAB_BUILD_TYPE' (want development, release or official)" >&2
     exit 2
     ;;
 esac
