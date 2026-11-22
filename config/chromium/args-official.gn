@@ -13,9 +13,9 @@
 #   satisfies it); gn gen only resolves the path through
 #   tools/update_pgo_profiles.py and aborts if the file is missing.
 #   (checkout_pgo_profiles gates only the optional V8 builtins profile.)
-# - enable_android_secondary_abi = is_official_build (abi.gni): native
-#   targets get rules a second time for the 32-bit ABI, so gn gen, ninja
-#   parse and the compile are all slower than the release variant.
+# - enable_android_secondary_abi defaults to is_official_build (abi.gn):
+#   native targets would get rules a second time for the 32-bit ABI.
+#   Disabled below (arm64 phones only), so this cost does not apply.
 #
 # TRIAL (2026-11-22): no public free-runner Android official build has ever
 # been verified. This variant exists to find out where it breaks.
@@ -36,6 +36,11 @@ target_cpu = "arm64"
 is_debug = false
 symbol_level = 0
 is_official_build = true
+
+# Official builds default to also building the 32-bit secondary ABI (one
+# APK for all devices). This build targets arm64 phones only, so turn it
+# off: it saves a full second native build and keeps the APK arm64-only.
+enable_android_secondary_abi = false
 
 # Distribution outside Play Store during development.
 android_channel = "default"
