@@ -82,6 +82,16 @@ if ! grep -q "'android'" .gclient; then
   printf "\ntarget_os = [ 'android' ]\n" >> .gclient
 fi
 
+# Official builds need the PGO profile downloads: DEPS hooks gated on
+# checkout_pgo_profiles fetch the V8 builtins profile (required by
+# snapshot_blob.bin in official builds), plus AFDO and other Chrome PGO
+# profiles. The variable only gates downloads; the profiles are only
+# considered by the build when is_official_build is set, so enabling it
+# here is harmless for development/release hops (a little extra download).
+if ! grep -q "checkout_pgo_profiles" .gclient; then
+  printf "\ncustom_vars = { 'checkout_pgo_profiles': True }\n" >> .gclient
+fi
+
 # -----------------------------------------------------------------------------
 # 4. Sync dependencies at the pinned tag (-D deletes stale dependencies)
 # -----------------------------------------------------------------------------
