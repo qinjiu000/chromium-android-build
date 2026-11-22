@@ -12,6 +12,7 @@ adapted-159-media-router-discovery-guard.patch
 adapted-159-rlz-disable-ping-handler.patch
 adapted-159-safe_browsing-disable-incident-reporting.patch
 adapted-159-theme-webstore-icons-extensions-core-guard.patch
+adapted-159-ui-resources-favicon-extensions-core-guard.patch
 adapted-159-ui-remove-signin-sync-settings.patch
 block-trk-and-subdomains.patch
 disable-crash-reporter.patch
