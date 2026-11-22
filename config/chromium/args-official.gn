@@ -1,0 +1,101 @@
+# =============================================================================
+# GN arguments: OFFICIAL channel (is_official_build=true)
+#
+# Same shape as args-release.gn, plus is_official_build=true. That flips
+# two heavy defaults (verified against the 159 tree):
+# - use_thin_lto: on for official Android (build/config/compiler/compiler.gni:
+#   is_clang && is_official_build && is_android && target_os != "chromeos").
+# - chrome_pgo_phase = 2 (build/config/compiler/pgo/pgo.gni: official +
+#   is_high_end_android, which is true for arm64). The PGO profile
+#   (chrome/android/orderfiles/arm64/pgo_profile.arm64.profdata) arrives
+#   via the orderfiles CIPD package during gclient sync (DEPS condition:
+#   checkout_android and non_git_source — the workflow's Android sync
+#   satisfies it); gn gen only resolves the path through
+#   tools/update_pgo_profiles.py and aborts if the file is missing.
+#   (checkout_pgo_profiles gates only the optional V8 builtins profile.)
+# - enable_android_secondary_abi = is_official_build (abi.gni): native
+#   targets get rules a second time for the 32-bit ABI, so gn gen, ninja
+#   parse and the compile are all slower than the release variant.
+#
+# TRIAL (2026-11-22): no public free-runner Android official build has ever
+# been verified. This variant exists to find out where it breaks.
+#
+# Reference: upstream docs/android_build_instructions.md
+# =============================================================================
+
+# Android target on an x86-64 Linux build host, 64-bit ARM device target.
+target_os = "android"
+target_cpu = "arm64"
+
+# Optimized build, no debug symbols. Release compiles are slower per file
+# (optimizations on) and use more memory per translation unit than the
+# debug config, so a release chain needs more hops than the debug chain.
+# NOTE: component builds are disallowed on Android upstream
+# (BUILDCONFIG.gn asserts !(current_os == "android" && is_component_build))
+# — is_component_build must NEVER be set here.
+is_debug = false
+symbol_level = 0
+is_official_build = true
+
+# Distribution outside Play Store during development.
+android_channel = "default"
+
+# Same as the development config (verified against the Chromium 159 tree,
+# build/config/android/config.gni): turn the Java static-analysis steps off.
+# iNWEB hit hop 13's AUTONINJA_BUILD_ID failure in exactly those steps
+# (android_static_analysis=build_server Java validate_deps). "off" is the
+# same value is_official_build selects, and it removes the failing steps
+# instead of working around them. build_android.sh still exports
+# AUTONINJA_BUILD_ID as belt-and-braces.
+android_static_analysis = "off"
+
+# =============================================================================
+# Selective de-Google, Phase 1 (ungoogled-chromium 158 patch set, adapted
+# for 159; see patches/ungoogled/ + the assessment report in the goal's
+# hidden_files/). Keep: Google Search, Safe Browsing (as-is, no API key),
+# Chrome Web Store, local autofill, spellcheck. Remove: Sync/sign-in,
+# field trials, metrics/crash reporting, other Google service domains.
+# =============================================================================
+
+# No Google API keys (same as before — the build never had any; now explicit).
+google_api_key = ""
+google_default_client_id = ""
+google_default_client_secret = ""
+use_official_google_api_keys = false
+
+# Field trials off (complements the disable-fetching-field-trials patch).
+disable_fieldtrial_testing_config = true
+
+# Google services off.
+enable_hangout_services_extension = false
+enable_mdns = false
+enable_reporting = false
+enable_service_discovery = false
+
+# On-device AI model service off (replaces the pruned-binaries patch hunk
+# we dropped — we do not prune binaries, so the build fix is not needed).
+use_on_device_model_service = false
+
+# Warnings must not fail the patched build (patches can leave unused
+# variables/imports behind).
+treat_warnings_as_errors = false
+
+# Android extension support via the desktop-mode path
+# (enable_desktop_android_extensions, declared in
+# extensions/buildflags/buildflags.gni). Stock Android Chrome disables
+# extensions; Kiwi/Yandex proved this path works. Phone-side extension
+# management UI still needs custom work; Web Store install flow needs
+# verification on device.
+enable_desktop_android_extensions = true
+
+# Deliberately NOT set:
+# - safe_browsing_mode: keep the default (Safe Browsing stays ON). ungoogled
+#   sets safe_browsing_mode=0; the user keeps Safe Browsing as-is.
+# - enable_remoting: already false on Android (remoting/remoting_enable.gni).
+# - enable_nacl: removed from the Chromium tree (no such arg in 159);
+#   passing it would fail gn gen.
+# - blink_symbol_level / v8_symbol_level: left at their defaults, which
+#   follow symbol_level=0.
+# - is_java_debug: defaults to is_debug (false here).
+# - use_thin_lto: defaults ON for official Android builds (compiler.gni);
+#   leave alone — it is the point of this variant.
