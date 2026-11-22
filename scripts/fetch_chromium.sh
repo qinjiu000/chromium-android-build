@@ -82,15 +82,93 @@ if ! grep -q "'android'" .gclient; then
   printf "\ntarget_os = [ 'android' ]\n" >> .gclient
 fi
 
-# Official builds need the PGO profile downloads: DEPS hooks gated on
-# checkout_pgo_profiles fetch the V8 builtins profile (required by
-# snapshot_blob.bin in official builds), plus AFDO and other Chrome PGO
-# profiles. The variable only gates downloads; the profiles are only
-# considered by the build when is_official_build is set, so enabling it
-# here is harmless for development/release hops (a little extra download).
-if ! grep -q "checkout_pgo_profiles" .gclient; then
-  printf "\ncustom_vars = { 'checkout_pgo_profiles': True }\n" >> .gclient
-fi
+# Official builds need the PGO profile downloads.  gclient reads custom_vars
+# from the first solution dictionary, not from a top-level .gclient variable.
+python3 - <<'PY'
+import ast
+from pathlib import Path
+
+path = Path(".gclient")
+text = path.read_text(encoding="utf-8")
+
+def line_col_offset(source, node):
+    lines = source.splitlines(keepends=True)
+    return sum(len(line) for line in lines[: node.lineno - 1]) + node.col_offset
+
+tree = ast.parse(text, filename=str(path))
+solutions_assignment = None
+for node in tree.body:
+    if isinstance(node, ast.Assign):
+        if any(isinstance(target, ast.Name) and target.id == "solutions"
+               for target in node.targets):
+            if solutions_assignment is not None:
+                raise SystemExit("ERROR: multiple solutions assignments in .gclient")
+            solutions_assignment = node
+
+if (solutions_assignment is None or
+        not isinstance(solutions_assignment.value, ast.List) or
+        not solutions_assignment.value.elts):
+    raise SystemExit("ERROR: expected solutions list was not found in .gclient")
+solution = solutions_assignment.value.elts[0]
+if not isinstance(solution, ast.Dict):
+    raise SystemExit("ERROR: expected solutions[0] dictionary was not found")
+
+custom_vars = None
+for name, value in zip(solution.keys, solution.values):
+    if isinstance(name, ast.Constant) and name.value == "custom_vars":
+        custom_vars = value
+        break
+if not isinstance(custom_vars, ast.Dict):
+    raise SystemExit("ERROR: expected solutions[0]['custom_vars'] dictionary was not found")
+
+profile = None
+for name, value in zip(custom_vars.keys, custom_vars.values):
+    if isinstance(name, ast.Constant) and name.value == "checkout_pgo_profiles":
+        profile = value
+        break
+if profile is not None:
+    if isinstance(profile, ast.Constant) and profile.value is True:
+        pass
+    else:
+        start = line_col_offset(text, profile)
+        end = (sum(len(line) for line in text.splitlines(keepends=True)
+                   [: profile.end_lineno - 1]) + profile.end_col_offset)
+        text = text[:start] + "True" + text[end:]
+else:
+    if text[line_col_offset(text, custom_vars):line_col_offset(text, custom_vars) + 1] != "{":
+        raise SystemExit("ERROR: expected custom_vars = {} pattern was not found")
+    start = line_col_offset(text, custom_vars) + 1
+    separator = "" if not custom_vars.keys else " "
+    text = text[:start] + (
+        separator + "'checkout_pgo_profiles': True" +
+        (", " if custom_vars.keys else "")
+    ) + text[start:]
+
+# Remove an obsolete top-level custom_vars assignment left by the old block.
+tree = ast.parse(text, filename=str(path))
+lines = text.splitlines(keepends=True)
+removals = []
+for node in tree.body:
+    if (isinstance(node, ast.Assign) and
+            any(isinstance(target, ast.Name) and target.id == "custom_vars"
+                for target in node.targets)):
+        removals.append(node)
+for node in sorted(removals, key=lambda item: item.lineno, reverse=True):
+    del lines[node.lineno - 1:node.end_lineno]
+text = "".join(lines)
+path.write_text(text, encoding="utf-8")
+
+tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+solutions = None
+for node in tree.body:
+    if (isinstance(node, ast.Assign) and
+            any(isinstance(target, ast.Name) and target.id == "solutions"
+                for target in node.targets)):
+        solutions = ast.literal_eval(node.value)
+        break
+assert solutions is not None
+assert solutions[0]["custom_vars"]["checkout_pgo_profiles"] is True
+PY
 
 # -----------------------------------------------------------------------------
 # 4. Sync dependencies at the pinned tag (-D deletes stale dependencies)
