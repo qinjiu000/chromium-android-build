@@ -75,7 +75,7 @@ fetch_and_verify() {
   local actual
 
   if [ ! -f "$checksum" ]; then
-    curl -fL "$BASE_URL/$artifact.sha1" -o "$checksum"
+    curl --retry 5 --retry-all-errors -fL "$BASE_URL/$artifact.sha1" -o "$checksum"
   fi
   actual="$(awk '{print $1}' "$checksum")"
   if [ "$actual" != "$expected" ]; then
@@ -89,7 +89,7 @@ fetch_and_verify() {
     actual=""
   fi
   if [ "$actual" != "$expected" ]; then
-    curl -fL "$BASE_URL/$artifact" -o "$archive.tmp"
+    curl --retry 5 --retry-all-errors -fL "$BASE_URL/$artifact" -o "$archive.tmp"
     actual="$(sha1sum "$archive.tmp" | awk '{print $1}')"
     if [ "$actual" != "$expected" ]; then
       rm -f "$archive.tmp"
