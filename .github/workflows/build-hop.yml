@@ -107,7 +107,12 @@ permissions:
   actions: write
 
 concurrency:
-  group: build-hop
+  # Per-build-type group (2026-11-22): hops of one chain still serialize,
+  # but different build-types run in parallel. The shared group cost us
+  # official hop 1: it waited pending ~4h, then GitHub cancelled it the
+  # moment release hop 2 was dispatched (a group keeps only the latest
+  # pending run; cancel-in-progress=false protects running runs only).
+  group: build-hop-${{ inputs.build-type }}
   cancel-in-progress: false
 
 env:
