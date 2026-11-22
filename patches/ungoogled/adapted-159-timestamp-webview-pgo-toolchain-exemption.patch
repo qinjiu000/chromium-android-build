@@ -1,0 +1,15 @@
+diff --git a/build/timestamp.gni b/build/timestamp.gni
+index 5bb7ccc..fa98e9e 100644
+--- a/build/timestamp.gni
++++ b/build/timestamp.gni
+@@ -11,7 +11,9 @@ if (is_android) {
+ 
+   # Ensure the exec_script() runs only once in default debug configs to
+   # minimize "gn gen" overhead.
+-  if (!enable_android_secondary_abi) {
++  if (!enable_android_secondary_abi &&
++      current_toolchain !=
++          "//build/toolchain/android:android_clang_arm64_webview") {
+     assert(
+         current_toolchain == default_toolchain,
+         "Trying to run compute_build_timestamp.py in toolchain: $current_toolchain")
