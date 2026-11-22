@@ -107,10 +107,14 @@ permissions:
   actions: write
 
 concurrency:
-  # Per-branch group: hops within one chain still serialize, but the
-  # fingerprint-python chain no longer queues behind the degoogle-selective
-  # chain (or vice versa) — the two chains run in parallel on free runners.
-  group: build-hop-${{ github.ref }}
+  # Per-branch-per-build-type group: hops within one chain still serialize,
+  # but the fingerprint-python chain no longer queues behind the
+  # degoogle-selective chain (or vice versa) — the two chains run in
+  # parallel on free runners. Per-build-type because a shared group keeps
+  # only the latest pending run: on degoogle-selective it cancelled official
+  # hop 1 after ~4h pending, the moment release hop 2 was dispatched
+  # (2026-11-22).
+  group: build-hop-${{ github.ref }}-${{ inputs.build-type }}
   cancel-in-progress: false
 
 env:
