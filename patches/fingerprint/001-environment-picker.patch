@@ -21,7 +21,7 @@ index 6b86cc1..8978658 100644
          <!-- ChromeTabbedActivity related -->
 +        <activity android:name="org.chromium.chrome.browser.environments.EnvironmentPickerActivity"
 +            android:exported="true"
-+            android:theme="@style/LauncherTheme"
++            android:theme="@style/Theme.Chromium.TabbedMode"
 +            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|mcc|mnc|screenLayout|smallestScreenSize|uiMode|density" />
          <activity android:name="org.chromium.chrome.browser.ChromeTabbedActivity"
              android:theme="@style/Theme.Chromium.TabbedMode"
