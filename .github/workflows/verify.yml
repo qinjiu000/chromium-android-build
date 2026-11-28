@@ -151,6 +151,30 @@ jobs:
             echo "PATCHES: PASS"
           } 2>&1 | tee verify-logs/40-patches.txt
 
+      # ---- stage: launcher activities must show a window ------------------
+      # The 2026-11-27 bug: both home-screen icons did nothing because the
+      # two new launcher activities used LauncherTheme, which inherits
+      # Theme.BrowserUI.NoDisplay (windowNoDisplay=true). The config was
+      # legal, so lint and gn gen both passed; only a platform-rule check
+      # or a real tap catches it. This runs in seconds on the patched
+      # manifest. It follows activity-alias targets, so it catches the
+      # environment picker (reached via the Main alias), not just
+      # activities with their own LAUNCHER filter. Forwarding trampolines
+      # (ChromeLauncherActivity, DragAndDropLauncherActivity, ...) are
+      # deliberately not flagged -- they have no LAUNCHER filter.
+      - name: Check launcher themes
+        id: launcher
+        if: ${{ always() && steps.patches.outcome == 'success' }}
+        timeout-minutes: 5
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          python3 "$GITHUB_WORKSPACE/scripts/check_launcher_theme.py" \
+            "$PWD/chromium/src/chrome/android/java/AndroidManifest.xml" \
+            --styles "$PWD/chromium/src/chrome/android/java/res/values" \
+            2>&1 | tee verify-logs/47-launcher.txt
+          echo "LAUNCHER: PASS" | tee -a verify-logs/47-launcher.txt
+
       # ---- stage: CPython prebuilt fetch ------------------------------------
       # The cpython GN targets reference the unpacked files (android_assets
       # sources are existence-checked at gen time), so the fetch must run
@@ -218,11 +242,11 @@ jobs:
         run: |
           {
             echo "event=${GITHUB_EVENT_NAME} chromium_tag=${CHROMIUM_TAG}"
-            grep -h "TAG:\|PATCHES:\|CPYTHON:\|GNARGS:\|LINT:" verify-logs/*.txt 2>/dev/null || echo "(no stage verdicts)"
+            grep -h "TAG:\|PATCHES:\|CPYTHON:\|GNARGS:\|LINT:\|LAUNCHER-THEME:" verify-logs/*.txt 2>/dev/null || echo "(no stage verdicts)"
             echo "COMPILE: NONE (this job never compiles C++ — compile evidence lives in the build-hop chain only)"
           } | tee verify-logs/99-verdict.txt
           cat verify-logs/99-verdict.txt >> "$GITHUB_STEP_SUMMARY"
-          if [ "${{ steps.fetch.outcome }}" != "success" ] || [ "${{ steps.tag.outcome }}" != "success" ] || [ "${{ steps.patches.outcome }}" != "success" ] || [ "${{ steps.cpython.outcome }}" != "success" ] || [ "${{ steps.gnargs.outcome }}" != "success" ] || [ "${{ steps.lint.outcome }}" != "success" ]; then
+          if [ "${{ steps.fetch.outcome }}" != "success" ] || [ "${{ steps.tag.outcome }}" != "success" ] || [ "${{ steps.patches.outcome }}" != "success" ] || [ "${{ steps.cpython.outcome }}" != "success" ] || [ "${{ steps.gnargs.outcome }}" != "success" ] || [ "${{ steps.lint.outcome }}" != "success" ] || [ "${{ steps.launcher.outcome }}" != "success" ]; then
             echo "VERIFY: FAILED (see stage verdicts above)"
             exit 1
           fi
