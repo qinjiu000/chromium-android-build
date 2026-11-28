@@ -85,10 +85,10 @@ index 3f16623..a15e29b 100644
 +}
 diff --git a/chrome/android/cpython/python_bridge.cc b/chrome/android/cpython/python_bridge.cc
 new file mode 100644
-index 0000000..90e2008
+index 0000000..dba8316
 --- /dev/null
 +++ b/chrome/android/cpython/python_bridge.cc
-@@ -0,0 +1,303 @@
+@@ -0,0 +1,327 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -118,19 +118,30 @@ index 0000000..90e2008
 +// after init so later calls can re-acquire it via PyGILState_Ensure().
 +PyThreadState* g_saved_thread_state = nullptr;
 +
-+bool AppendModuleSearchPath(PyConfig* config, const std::string& path) {
++std::string PythonStatusMessage(const char* operation, const PyStatus& status) {
++  return std::string(operation) + ": "
++      + (status.err_msg ? status.err_msg : "CPython returned an unspecified error");
++}
++
++bool AppendModuleSearchPath(PyConfig* config,
++                            const std::string& path,
++                            std::string* error) {
 +  wchar_t* wide_path = Py_DecodeLocale(path.c_str(), nullptr);
 +  if (!wide_path) {
++    *error = "Unable to decode Python module search path: " + path;
 +    return false;
 +  }
 +  PyStatus status =
 +      PyWideStringList_Append(&config->module_search_paths, wide_path);
 +  PyMem_RawFree(wide_path);
 +  if (PyStatus_Exception(status)) {
++    *error = PythonStatusMessage("PyWideStringList_Append", status);
 +    return false;
 +  }
 +  return true;
 +}
++
++std::string g_initialization_error;
 +
 +std::string FormatPythonException() {
 +  PyObject* exc_type = nullptr;
@@ -212,13 +223,17 @@ index 0000000..90e2008
 +                const std::string& native_lib_dir,
 +                const std::string& cache_dir) {
 +  std::call_once(g_initialize_once, [&]() {
++    g_initialization_error.clear();
 +    mkdir(cache_dir.c_str(), 0700);
 +
 +    PyConfig config;
 +    PyConfig_InitIsolatedConfig(&config);
 +
 +    PyStatus status =
-+        PyConfig_SetBytesString(&config, &config.program_name, "chrome");
++        PyConfig_SetBytesString(&config, &config.home, stdlib_dir.c_str());
++    if (!PyStatus_Exception(status)) {
++      status = PyConfig_SetBytesString(&config, &config.program_name, "chrome");
++    }
 +    if (!PyStatus_Exception(status)) {
 +      status =
 +          PyConfig_SetBytesString(&config, &config.base_executable, "chrome");
@@ -229,22 +244,28 @@ index 0000000..90e2008
 +                                  cache_dir.c_str());
 +    }
 +    if (PyStatus_Exception(status)) {
++      g_initialization_error = PythonStatusMessage("PyConfig_SetBytesString", status);
++      LOG(ERROR) << g_initialization_error;
 +      PyConfig_Clear(&config);
 +      return;
 +    }
 +
 +    config.module_search_paths_set = 1;
-+    if (!AppendModuleSearchPath(&config, stdlib_dir) ||
-+        !AppendModuleSearchPath(&config, native_lib_dir)) {
++    if (!AppendModuleSearchPath(&config, stdlib_dir, &g_initialization_error) ||
++        !AppendModuleSearchPath(&config, native_lib_dir, &g_initialization_error)) {
++      LOG(ERROR) << g_initialization_error;
 +      PyConfig_Clear(&config);
 +      return;
 +    }
 +
 +    status = Py_InitializeFromConfig(&config);
-+    PyConfig_Clear(&config);
 +    if (PyStatus_Exception(status)) {
++      g_initialization_error = PythonStatusMessage("Py_InitializeFromConfig", status);
++      LOG(ERROR) << g_initialization_error;
++      PyConfig_Clear(&config);
 +      return;
 +    }
++    PyConfig_Clear(&config);
 +
 +    g_saved_thread_state = PyEval_SaveThread();
 +    g_initialized.store(true);
@@ -368,7 +389,7 @@ index 0000000..90e2008
 +  return result;
 +}
 +
-+static bool JNI_PythonBridge_NativeInitialize(
++static base::android::ScopedJavaLocalRef<jstring> JNI_PythonBridge_NativeInitialize(
 +    JNIEnv* env,
 +    const base::android::JavaRef<jstring>& stdlib_dir,
 +    const base::android::JavaRef<jstring>& native_lib_dir,
@@ -378,7 +399,10 @@ index 0000000..90e2008
 +      base::android::ConvertJavaStringToUTF8(env, native_lib_dir);
 +  std::string cache =
 +      base::android::ConvertJavaStringToUTF8(env, cache_dir);
-+  return Initialize(stdlib, native_lib, cache);
++  if (!Initialize(stdlib, native_lib, cache)) {
++    return base::android::ConvertUTF8ToJavaString(env, g_initialization_error);
++  }
++  return base::android::ConvertUTF8ToJavaString(env, "");
 +}
 +
 +static base::android::ScopedJavaLocalRef<jstring>
@@ -420,10 +444,10 @@ index 0000000..0a5555f
 +#endif  // CHROME_ANDROID_CPYTHON_PYTHON_BRIDGE_H_
 diff --git a/chrome/android/java/src/org/chromium/chrome/browser/cpython/PythonBridge.java b/chrome/android/java/src/org/chromium/chrome/browser/cpython/PythonBridge.java
 new file mode 100644
-index 0000000..83d90d0
+index 0000000..20cf5ff
 --- /dev/null
 +++ b/chrome/android/java/src/org/chromium/chrome/browser/cpython/PythonBridge.java
-@@ -0,0 +1,167 @@
+@@ -0,0 +1,160 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -478,17 +502,14 @@ index 0000000..83d90d0
 +
 +            try {
 +                if (!marker.exists()
-+                        || !new String(
-+                                        Files.readAllBytes(marker.toPath()),
-+                                        StandardCharsets.UTF_8)
++                        || !new String(Files.readAllBytes(marker.toPath()), StandardCharsets.UTF_8)
 +                                .trim()
 +                                .equals(MARKER_VERSION)) {
 +                    extractStdlib(context, stdlibDir);
 +                    if (!pythonDir.isDirectory() && !pythonDir.mkdirs()) {
 +                        throw new IOException("Unable to create Python directory");
 +                    }
-+                    try (OutputStream output =
-+                            new FileOutputStream(marker)) {
++                    try (OutputStream output = new FileOutputStream(marker)) {
 +                        output.write(MARKER_VERSION.getBytes(StandardCharsets.UTF_8));
 +                    }
 +                }
@@ -497,15 +518,18 @@ index 0000000..83d90d0
 +                }
 +            } catch (IOException | RuntimeException exception) {
 +                throw new IllegalStateException(
-+                        "Unable to prepare CPython files", exception);
++                        "Unable to prepare CPython files: " + exception.getMessage(), exception);
 +            }
 +
-+            if (!PythonBridgeJni.get()
-+                    .nativeInitialize(
-+                            stdlibDir.getAbsolutePath(),
-+                            context.getApplicationInfo().nativeLibraryDir,
-+                            cacheDir.getAbsolutePath())) {
-+                throw new IllegalStateException("Unable to initialize CPython");
++            String initializationError =
++                    PythonBridgeJni.get()
++                            .nativeInitialize(
++                                    stdlibDir.getAbsolutePath(),
++                                    context.getApplicationInfo().nativeLibraryDir,
++                                    cacheDir.getAbsolutePath());
++            if (!initializationError.isEmpty()) {
++                throw new IllegalStateException(
++                        "Unable to initialize CPython: " + initializationError);
 +            }
 +            sInitialized = true;
 +        }
@@ -529,8 +553,7 @@ index 0000000..83d90d0
 +        return sInitialized;
 +    }
 +
-+    private static void extractStdlib(Context context, File stdlibDir)
-+            throws IOException {
++    private static void extractStdlib(Context context, File stdlibDir) throws IOException {
 +        if (!stdlibDir.isDirectory() && !stdlibDir.mkdirs()) {
 +            throw new IOException("Unable to create Python stdlib directory");
 +        }
@@ -539,8 +562,7 @@ index 0000000..83d90d0
 +        String rootPath = canonicalRoot.getPath();
 +        byte[] buffer = new byte[8192];
 +
-+        try (InputStream asset =
-+                        context.getAssets().open("python_stdlib.zip");
++        try (InputStream asset = context.getAssets().open("python_stdlib.zip");
 +                ZipInputStream zip = new ZipInputStream(asset)) {
 +            ZipEntry entry;
 +            while ((entry = zip.getNextEntry()) != null) {
@@ -560,16 +582,12 @@ index 0000000..83d90d0
 +
 +                if (entry.isDirectory()) {
 +                    if (!output.isDirectory() && !output.mkdirs()) {
-+                        throw new IOException(
-+                                "Unable to create stdlib directory: " + output);
++                        throw new IOException("Unable to create stdlib directory: " + output);
 +                    }
 +                } else {
 +                    File parent = output.getParentFile();
-+                    if (parent != null
-+                            && !parent.isDirectory()
-+                            && !parent.mkdirs()) {
-+                        throw new IOException(
-+                                "Unable to create stdlib parent: " + parent);
++                    if (parent != null && !parent.isDirectory() && !parent.mkdirs()) {
++                        throw new IOException("Unable to create stdlib parent: " + parent);
 +                    }
 +                    try (OutputStream outputStream = new FileOutputStream(output)) {
 +                        int read;
@@ -585,8 +603,7 @@ index 0000000..83d90d0
 +
 +    @NativeMethods
 +    interface Natives {
-+        boolean nativeInitialize(
-+                String stdlibDir, String nativeLibDir, String cacheDir);
++        String nativeInitialize(String stdlibDir, String nativeLibDir, String cacheDir);
 +
 +        String nativeEval(String code);
 +    }

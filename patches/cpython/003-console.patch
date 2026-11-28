@@ -1,5 +1,5 @@
 diff --git a/chrome/android/chrome_java_sources.gni b/chrome/android/chrome_java_sources.gni
-index d93b36d..09cdd1e 100644
+index e8e76e1..6ce6fe2 100644
 --- a/chrome/android/chrome_java_sources.gni
 +++ b/chrome/android/chrome_java_sources.gni
 @@ -491,6 +491,7 @@ chrome_java_sources = [
@@ -11,10 +11,10 @@ index d93b36d..09cdd1e 100644
    "java/src/org/chromium/chrome/browser/crash/ChromeMinidumpUploaderDelegate.java",
    "java/src/org/chromium/chrome/browser/crash/ChromePureJavaExceptionReporter.java",
 diff --git a/chrome/android/java/AndroidManifest.xml b/chrome/android/java/AndroidManifest.xml
-index 6b86cc1..8e9a442 100644
+index 0574585..d969009 100644
 --- a/chrome/android/java/AndroidManifest.xml
 +++ b/chrome/android/java/AndroidManifest.xml
-@@ -687,6 +687,16 @@ by a child template that "extends" this file.
+@@ -691,6 +691,16 @@ by a child template that "extends" this file.
              {{ self.supports_vr() }}
              {{ self.extra_web_rendering_activity_definitions() }}
          </activity-alias>
@@ -33,10 +33,10 @@ index 6b86cc1..8e9a442 100644
              android:exported="false"
 diff --git a/chrome/android/java/src/org/chromium/chrome/browser/cpython/PythonConsoleActivity.java b/chrome/android/java/src/org/chromium/chrome/browser/cpython/PythonConsoleActivity.java
 new file mode 100644
-index 0000000..b3111a7
+index 0000000..38579f7
 --- /dev/null
 +++ b/chrome/android/java/src/org/chromium/chrome/browser/cpython/PythonConsoleActivity.java
-@@ -0,0 +1,206 @@
+@@ -0,0 +1,227 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -65,27 +65,28 @@ index 0000000..b3111a7
 +import java.util.concurrent.atomic.AtomicBoolean;
 +
 +/**
-+ * Standalone Python console: a plain Activity with an input box and an output
-+ * area, running arbitrary Python code (REPL-style) in the browser process.
++ * Standalone Python console: a plain Activity with an input box and an output area, running
++ * arbitrary Python code (REPL-style) in the browser process.
 + *
 + * <p>Honest v1 limits, all accepted for a personal tool (see design doc §3.2):
++ *
 + * <ul>
-+ *   <li>Same process as the browser: a native crash inside Python kills the
-+ *       browser too. A separate-process console is a later hardening step.
-+ *   <li>The 30-second watchdog is advisory only: a hung eval keeps running on
-+ *       the worker thread (CPython cannot be interrupted from Java) and later
-+ *       runs queue behind it. Kill the app if a run never returns.
++ *   <li>Same process as the browser: a native crash inside Python kills the browser too. A
++ *       separate-process console is a later hardening step.
++ *   <li>The 30-second watchdog is advisory only: a hung eval keeps running on the worker thread
++ *       (CPython cannot be interrupted from Java) and later runs queue behind it. Kill the app if a
++ *       run never returns.
 + *   <li>No memory limit is enforced in v1.
 + * </ul>
 + *
-+ * <p>All Python work runs on a single worker thread (the interpreter is
-+ * initialized once and shared with the automation bridge); results are posted
-+ * back to the UI thread.
++ * <p>All Python work runs on a single worker thread (the interpreter is initialized once and shared
++ * with the automation bridge); results are posted back to the UI thread.
 + */
 +@NullMarked
 +public class PythonConsoleActivity extends Activity {
 +    /** Advisory run timeout; the worker thread cannot be interrupted. */
 +    private static final int EVAL_TIMEOUT_SECONDS = 30;
++
 +    /** Trim the output view once it grows past this many characters. */
 +    private static final int MAX_OUTPUT_CHARS = 200_000;
 +
@@ -129,6 +130,7 @@ index 0000000..b3111a7
 +        runButton.setText("运行");
 +        runButton.setOnClickListener(view -> onRunClicked());
 +        mRunButton = runButton;
++        runButton.setEnabled(false);
 +        buttonRow.addView(runButton);
 +
 +        Button clearButton = new Button(this);
@@ -150,7 +152,8 @@ index 0000000..b3111a7
 +                outputScroll,
 +                new LinearLayout.LayoutParams(
 +                        LinearLayout.LayoutParams.MATCH_PARENT,
-+                        LinearLayout.LayoutParams.MATCH_PARENT, 1f));
++                        LinearLayout.LayoutParams.MATCH_PARENT,
++                        1f));
 +
 +        setContentView(layout);
 +
@@ -162,6 +165,11 @@ index 0000000..b3111a7
 +                    try {
 +                        PythonBridge.initialize(getApplicationContext());
 +                        appendOutput("Python 3.13.16 就绪\n");
++                        runOnUiThread(
++                                () -> {
++                                    Button button = mRunButton;
++                                    if (button != null) button.setEnabled(true);
++                                });
 +                    } catch (IllegalStateException e) {
 +                        appendOutput("Python 初始化失败：" + e.getMessage() + "\n");
 +                    }
@@ -182,6 +190,10 @@ index 0000000..b3111a7
 +            Toast.makeText(this, "正在运行，请稍候", Toast.LENGTH_SHORT).show();
 +            return;
 +        }
++        if (!PythonBridge.isInitialized()) {
++            appendOutput("Python 尚未初始化，已跳过执行。\n");
++            return;
++        }
 +        EditText input = mInput;
 +        if (input == null) return;
 +        String code = input.getText().toString();
@@ -199,7 +211,9 @@ index 0000000..b3111a7
 +                () -> {
 +                    if (!finished.get()) {
 +                        appendOutput(
-+                                "（#" + runNumber + " 执行超过 "
++                                "（#"
++                                        + runNumber
++                                        + " 执行超过 "
 +                                        + EVAL_TIMEOUT_SECONDS
 +                                        + " 秒，仍在后台运行；如需停止请退出应用）\n");
 +                    }
@@ -208,14 +222,22 @@ index 0000000..b3111a7
 +
 +        mExecutor.execute(
 +                () -> {
-+                    String result = PythonBridge.eval(code);
++                    String result;
++                    try {
++                        result = PythonBridge.eval(code);
++                    } catch (RuntimeException e) {
++                        result = "Python execution failed: " + e.getMessage();
++                    }
 +                    finished.set(true);
++                    String output = result;
 +                    runOnUiThread(
 +                            () -> {
-+                                appendOutput(result + "\n");
++                                appendOutput(output + "\n");
 +                                mRunning = false;
 +                                Button button = mRunButton;
-+                                if (button != null) button.setEnabled(true);
++                                if (button != null) {
++                                    button.setEnabled(PythonBridge.isInitialized());
++                                }
 +                            });
 +                });
 +    }
@@ -228,8 +250,7 @@ index 0000000..b3111a7
 +                    if (output == null) return;
 +                    output.append(text);
 +                    if (output.length() > MAX_OUTPUT_CHARS) {
-+                        output.getEditableText()
-+                                .delete(0, output.length() - MAX_OUTPUT_CHARS / 2);
++                        output.getEditableText().delete(0, output.length() - MAX_OUTPUT_CHARS / 2);
 +                    }
 +                    ScrollView scroll = mOutputScroll;
 +                    if (scroll != null) {

@@ -1,5 +1,5 @@
 diff --git a/chrome/android/chrome_java_sources.gni b/chrome/android/chrome_java_sources.gni
-index 09cdd1e..9060732 100644
+index 6ce6fe2..97e06b3 100644
 --- a/chrome/android/chrome_java_sources.gni
 +++ b/chrome/android/chrome_java_sources.gni
 @@ -491,6 +491,7 @@ chrome_java_sources = [
@@ -11,7 +11,7 @@ index 09cdd1e..9060732 100644
    "java/src/org/chromium/chrome/browser/crash/ChromeMinidumpUploadJobServiceImpl.java",
    "java/src/org/chromium/chrome/browser/crash/ChromeMinidumpUploaderDelegate.java",
 diff --git a/chrome/android/cpython/python_bridge.cc b/chrome/android/cpython/python_bridge.cc
-index 90e2008..3eb8a3a 100644
+index dba8316..3dd05a8 100644
 --- a/chrome/android/cpython/python_bridge.cc
 +++ b/chrome/android/cpython/python_bridge.cc
 @@ -13,6 +13,7 @@
@@ -35,9 +35,9 @@ index 90e2008..3eb8a3a 100644
 +jmethodID g_navigate_method = nullptr;
 +jmethodID g_eval_js_method = nullptr;
  
- bool AppendModuleSearchPath(PyConfig* config, const std::string& path) {
-   wchar_t* wide_path = Py_DecodeLocale(path.c_str(), nullptr);
-@@ -115,12 +124,331 @@ void RestoreRedirect(PyObject* sys_module,
+ std::string PythonStatusMessage(const char* operation, const PyStatus& status) {
+   return std::string(operation) + ": "
+@@ -126,6 +135,320 @@ void RestoreRedirect(PyObject* sys_module,
    PyErr_Clear();
  }
  
@@ -358,33 +358,36 @@ index 90e2008..3eb8a3a 100644
  }  // namespace
  
  bool Initialize(const std::string& stdlib_dir,
-                 const std::string& native_lib_dir,
+@@ -133,6 +456,12 @@ bool Initialize(const std::string& stdlib_dir,
                  const std::string& cache_dir) {
    std::call_once(g_initialize_once, [&]() {
+     g_initialization_error.clear();
 +    if (PyImport_AppendInittab("browser", &PyInit_browser) != 0) {
-+      LOG(ERROR) << "Unable to register CPython browser module";
++      g_initialization_error = "Unable to register CPython browser module";
++      LOG(ERROR) << g_initialization_error;
 +      return;
 +    }
 +
      mkdir(cache_dir.c_str(), 0700);
  
      PyConfig config;
-@@ -282,6 +610,9 @@ static bool JNI_PythonBridge_NativeInitialize(
+@@ -303,6 +632,10 @@ static base::android::ScopedJavaLocalRef<jstring> JNI_PythonBridge_NativeInitial
      const base::android::JavaRef<jstring>& stdlib_dir,
      const base::android::JavaRef<jstring>& native_lib_dir,
      const base::android::JavaRef<jstring>& cache_dir) {
 +  if (!CacheBrowserBridge(env)) {
-+    return false;
++    return base::android::ConvertUTF8ToJavaString(
++        env, "Unable to cache BrowserBridge methods");
 +  }
    std::string stdlib = base::android::ConvertJavaStringToUTF8(env, stdlib_dir);
    std::string native_lib =
        base::android::ConvertJavaStringToUTF8(env, native_lib_dir);
 diff --git a/chrome/android/java/src/org/chromium/chrome/browser/cpython/BrowserBridge.java b/chrome/android/java/src/org/chromium/chrome/browser/cpython/BrowserBridge.java
 new file mode 100644
-index 0000000..c60e104
+index 0000000..807f65b
 --- /dev/null
 +++ b/chrome/android/java/src/org/chromium/chrome/browser/cpython/BrowserBridge.java
-@@ -0,0 +1,303 @@
+@@ -0,0 +1,291 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -418,8 +421,8 @@ index 0000000..c60e104
 +/**
 + * UI-thread adapter for CPython browser automation.
 + *
-+ * <p>Never call back into Python from UI-thread work: Python can hold the GIL
-+ * while waiting for these calls, which would deadlock a UI-thread callback.
++ * <p>Never call back into Python from UI-thread work: Python can hold the GIL while waiting for
++ * these calls, which would deadlock a UI-thread callback.
 + */
 +@NullMarked
 +public final class BrowserBridge {
@@ -490,9 +493,7 @@ index 0000000..c60e104
 +                    ChromeTabCreator creator = activity.getTabCreator(false);
 +                    @Nullable Tab tab =
 +                            creator.createNewTab(
-+                                    new LoadUrlParams(url),
-+                                    TabLaunchType.FROM_CHROME_UI,
-+                                    null);
++                                    new LoadUrlParams(url), TabLaunchType.FROM_CHROME_UI, null);
 +                    return tab == null ? -1 : tab.getId();
 +                },
 +                -1);
@@ -511,8 +512,7 @@ index 0000000..c60e104
 +                    if (tab == null) {
 +                        return false;
 +                    }
-+                    model.getTabRemover()
-+                            .closeTabs(TabClosureParams.closeTab(tab).build(), false);
++                    model.getTabRemover().closeTabs(TabClosureParams.closeTab(tab).build(), false);
 +                    return true;
 +                },
 +                false);
@@ -546,25 +546,21 @@ index 0000000..c60e104
 +                        .post(
 +                                () -> {
 +                                    try {
-+                                        ChromeTabbedActivity activity =
-+                                                getForegroundActivity();
++                                        ChromeTabbedActivity activity = getForegroundActivity();
 +                                        if (activity == null) {
 +                                            latch.countDown();
 +                                            return;
 +                                        }
 +                                        @Nullable Tab tab =
-+                                                findTabById(
-+                                                        getNormalModel(activity), tabId);
++                                                findTabById(getNormalModel(activity), tabId);
 +                                        if (tab == null) {
 +                                            result.set("ERROR: tab not found");
 +                                            latch.countDown();
 +                                            return;
 +                                        }
-+                                        @Nullable WebContents webContents =
-+                                                tab.getWebContents();
++                                        @Nullable WebContents webContents = tab.getWebContents();
 +                                        if (webContents == null) {
-+                                            result.set(
-+                                                    "ERROR: tab has no web contents");
++                                            result.set("ERROR: tab has no web contents");
 +                                            latch.countDown();
 +                                            return;
 +                                        }
@@ -582,8 +578,7 @@ index 0000000..c60e104
 +                                                    }
 +                                                });
 +                                    } catch (RuntimeException exception) {
-+                                        result.set(
-+                                                "ERROR: JavaScript evaluation failed");
++                                        result.set("ERROR: JavaScript evaluation failed");
 +                                        latch.countDown();
 +                                    }
 +                                });
@@ -631,11 +626,8 @@ index 0000000..c60e104
 +    }
 +
 +    private static @Nullable ChromeTabbedActivity getForegroundActivity() {
-+        @Nullable Activity activity =
-+                ApplicationStatus.getLastTrackedFocusedActivity();
-+        return activity instanceof ChromeTabbedActivity
-+                ? (ChromeTabbedActivity) activity
-+                : null;
++        @Nullable Activity activity = ApplicationStatus.getLastTrackedFocusedActivity();
++        return activity instanceof ChromeTabbedActivity ? (ChromeTabbedActivity) activity : null;
 +    }
 +
 +    private static TabModel getNormalModel(ChromeTabbedActivity activity) {
@@ -653,8 +645,7 @@ index 0000000..c60e104
 +        return null;
 +    }
 +
-+    private static void appendTabJson(
-+            StringBuilder json, Tab tab, @Nullable Tab currentTab) {
++    private static void appendTabJson(StringBuilder json, Tab tab, @Nullable Tab currentTab) {
 +        @Nullable GURL tabUrl = tab.getUrl();
 +        String url = tabUrl == null ? "" : tabUrl.toString();
 +        @Nullable String tabTitle = tab.getTitle();

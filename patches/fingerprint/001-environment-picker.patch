@@ -12,7 +12,7 @@ index d93b36d..e8e76e1 100644
    "java/src/org/chromium/chrome/browser/externalnav/IntentWithRequestMetadataHandler.java",
    "java/src/org/chromium/chrome/browser/feedback/ChromeFeedbackCollector.java",
 diff --git a/chrome/android/java/AndroidManifest.xml b/chrome/android/java/AndroidManifest.xml
-index 6b86cc1..8978658 100644
+index 6b86cc1..0574585 100644
 --- a/chrome/android/java/AndroidManifest.xml
 +++ b/chrome/android/java/AndroidManifest.xml
 @@ -626,6 +626,10 @@ by a child template that "extends" this file.
@@ -37,10 +37,10 @@ index 6b86cc1..8978658 100644
                  android:value="true" />
 diff --git a/chrome/android/java/src/org/chromium/chrome/browser/environments/EnvironmentManager.java b/chrome/android/java/src/org/chromium/chrome/browser/environments/EnvironmentManager.java
 new file mode 100644
-index 0000000..dbfa434
+index 0000000..4258166
 --- /dev/null
 +++ b/chrome/android/java/src/org/chromium/chrome/browser/environments/EnvironmentManager.java
-@@ -0,0 +1,231 @@
+@@ -0,0 +1,244 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -93,8 +93,7 @@ index 0000000..dbfa434
 +    public static List<Environment> getEnvironments(Context context) {
 +        List<Environment> environments = new ArrayList<>();
 +        try {
-+            @Nullable String serialized =
-+                    getPreferences(context).getString(ENVIRONMENTS_KEY, "[]");
++            @Nullable String serialized = getPreferences(context).getString(ENVIRONMENTS_KEY, "[]");
 +            if (serialized == null) return environments;
 +            JSONArray array = new JSONArray(serialized);
 +            for (int i = 0; i < array.length(); ++i) {
@@ -179,6 +178,12 @@ index 0000000..dbfa434
 +        return new File(context.getCacheDir(), "envs/" + environment.id);
 +    }
 +
++    /** Creates the selected environment's user-data and cache directories. */
++    public static void ensureEnvironmentDirectories(Context context, Environment environment) {
++        ensureDirectory(getUserDataDir(context, environment));
++        ensureDirectory(getCacheDir(context, environment));
++    }
++
 +    /** Creates and selects the default environment if no environments are stored. */
 +    public static Environment ensureDefaultEnvironment(Context context) {
 +        List<Environment> environments = getEnvironments(context);
@@ -196,10 +201,11 @@ index 0000000..dbfa434
 +
 +    /** Adds the current environment's user-data, cache, and seed command-line switches. */
 +    public static void applyEnvironmentSwitches(Context context) {
-+        StrictMode.ThreadPolicy oldPolicy = StrictMode.allowThreadDiskReads();
++        StrictMode.ThreadPolicy oldPolicy = StrictMode.allowThreadDiskReadsWrites();
 +        try {
 +            Environment environment = getCurrentEnvironment(context);
 +            if (environment == null) environment = ensureDefaultEnvironment(context);
++            ensureEnvironmentDirectories(context, environment);
 +            CommandLine commandLine = CommandLine.getInstance();
 +            commandLine.appendSwitchWithValue(
 +                    "user-data-dir", getUserDataDir(context, environment).getAbsolutePath());
@@ -259,6 +265,13 @@ index 0000000..dbfa434
 +        }
 +    }
 +
++    private static void ensureDirectory(File directory) {
++        if (directory.isDirectory()) return;
++        if (!directory.mkdirs() && !directory.isDirectory()) {
++            throw new IllegalStateException("Unable to create environment directory: " + directory);
++        }
++    }
++
 +    /** Removes a file or directory tree, returning false if any deletion fails. */
 +    private static boolean deleteRecursively(File file) {
 +        if (!file.exists()) return true;
@@ -274,10 +287,10 @@ index 0000000..dbfa434
 +}
 diff --git a/chrome/android/java/src/org/chromium/chrome/browser/environments/EnvironmentPickerActivity.java b/chrome/android/java/src/org/chromium/chrome/browser/environments/EnvironmentPickerActivity.java
 new file mode 100644
-index 0000000..2c2b91f
+index 0000000..8b01376
 --- /dev/null
 +++ b/chrome/android/java/src/org/chromium/chrome/browser/environments/EnvironmentPickerActivity.java
-@@ -0,0 +1,139 @@
+@@ -0,0 +1,184 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -309,6 +322,8 @@ index 0000000..2c2b91f
 +public class EnvironmentPickerActivity extends Activity {
 +    private final List<EnvironmentManager.Environment> mEnvironments = new ArrayList<>();
 +    private @Nullable ArrayAdapter<String> mAdapter;
++    private @Nullable LinearLayout mCreateForm;
++    private @Nullable EditText mCreateEnvironmentName;
 +
 +    /** Ensures an initial environment exists before displaying the picker. */
 +    @Override
@@ -328,8 +343,32 @@ index 0000000..2c2b91f
 +        Button createButton = new Button(this);
 +        // TODO: Move UI strings into Android resources.
 +        createButton.setText("新建环境");
-+        createButton.setOnClickListener(view -> showCreateDialog());
++        createButton.setOnClickListener(view -> showCreateForm());
 +        layout.addView(createButton);
++
++        LinearLayout createForm = new LinearLayout(this);
++        createForm.setOrientation(LinearLayout.VERTICAL);
++        createForm.setVisibility(View.GONE);
++        mCreateForm = createForm;
++
++        EditText nameInput = new EditText(this);
++        nameInput.setHint("环境名称");
++        nameInput.setSingleLine(true);
++        mCreateEnvironmentName = nameInput;
++        createForm.addView(nameInput);
++
++        LinearLayout createActions = new LinearLayout(this);
++        Button saveButton = new Button(this);
++        saveButton.setText("创建");
++        saveButton.setOnClickListener(view -> createEnvironment());
++        createActions.addView(saveButton);
++
++        Button cancelButton = new Button(this);
++        cancelButton.setText("取消");
++        cancelButton.setOnClickListener(view -> hideCreateForm());
++        createActions.addView(cancelButton);
++        createForm.addView(createActions);
++        layout.addView(createForm);
 +
 +        ListView listView = new ListView(this);
 +        ArrayAdapter<String> adapter =
@@ -345,11 +384,20 @@ index 0000000..2c2b91f
 +    }
 +
 +    /** Opens the chosen environment in ChromeTabbedActivity. */
-+    private void onEnvironmentClicked(
-+            AdapterView<?> parent, View view, int position, long itemId) {
++    private void onEnvironmentClicked(AdapterView<?> parent, View view, int position, long itemId) {
 +        EnvironmentManager.Environment environment = mEnvironments.get(position);
++        StrictMode.ThreadPolicy oldPolicy = StrictMode.allowThreadDiskWrites();
++        try {
++            EnvironmentManager.ensureEnvironmentDirectories(this, environment);
++        } catch (IllegalStateException e) {
++            Toast.makeText(this, "无法准备环境目录：" + e.getMessage(), Toast.LENGTH_LONG).show();
++            return;
++        } finally {
++            StrictMode.setThreadPolicy(oldPolicy);
++        }
 +        EnvironmentManager.setCurrentEnvironment(this, environment.id);
-+        Intent intent = new Intent();
++        Intent intent = new Intent(Intent.ACTION_MAIN);
++        intent.addCategory(Intent.CATEGORY_LAUNCHER);
 +        intent.setClassName(this, "org.chromium.chrome.browser.ChromeTabbedActivity");
 +        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
 +        startActivity(intent);
@@ -368,8 +416,7 @@ index 0000000..2c2b91f
 +                .setPositiveButton(
 +                        "删除",
 +                        (dialog, which) -> {
-+                            if (!EnvironmentManager.deleteEnvironment(
-+                                    this, environment.id)) {
++                            if (!EnvironmentManager.deleteEnvironment(this, environment.id)) {
 +                                Toast.makeText(this, "删除环境失败", Toast.LENGTH_SHORT).show();
 +                            }
 +                            refreshEnvironments();
@@ -378,25 +425,36 @@ index 0000000..2c2b91f
 +        return true;
 +    }
 +
-+    /** Prompts for a name and creates an environment. */
-+    private void showCreateDialog() {
-+        EditText nameInput = new EditText(this);
-+        // TODO: Move UI strings into Android resources.
-+        nameInput.setHint("环境名称");
-+        new AlertDialog.Builder(this)
-+                .setTitle("新建环境")
-+                .setView(nameInput)
-+                .setNegativeButton("取消", null)
-+                .setPositiveButton(
-+                        "创建",
-+                        (dialog, which) -> {
-+                            String name = nameInput.getText().toString().trim();
-+                            if (!name.isEmpty()) {
-+                                EnvironmentManager.createEnvironment(this, name);
-+                                refreshEnvironments();
-+                            }
-+                        })
-+                .show();
++    private void showCreateForm() {
++        LinearLayout form = mCreateForm;
++        EditText nameInput = mCreateEnvironmentName;
++        if (form == null || nameInput == null) return;
++        form.setVisibility(View.VISIBLE);
++        nameInput.requestFocus();
++    }
++
++    private void hideCreateForm() {
++        LinearLayout form = mCreateForm;
++        EditText nameInput = mCreateEnvironmentName;
++        if (nameInput != null) nameInput.setText("");
++        if (form != null) form.setVisibility(View.GONE);
++    }
++
++    private void createEnvironment() {
++        EditText nameInput = mCreateEnvironmentName;
++        if (nameInput == null) return;
++        String name = nameInput.getText().toString().trim();
++        if (name.isEmpty()) {
++            Toast.makeText(this, "请输入环境名称", Toast.LENGTH_SHORT).show();
++            return;
++        }
++        try {
++            EnvironmentManager.createEnvironment(this, name);
++            refreshEnvironments();
++            hideCreateForm();
++        } catch (RuntimeException e) {
++            Toast.makeText(this, "创建环境失败：" + e.getMessage(), Toast.LENGTH_LONG).show();
++        }
 +    }
 +
 +    /** Reloads the environment list shown by the adapter. */
